@@ -24,7 +24,7 @@ export default function FileUploader({ onFileLoaded }: FileUploaderProps) {
 
       if (!isValidFile(file.name)) {
         setError(
-          `Formato no soportado. Usa archivos: ${ACCEPTED_EXTENSIONS.join(", ")}`,
+          `Formato no soportado. Usa: ${ACCEPTED_EXTENSIONS.join(", ")}`,
         );
         return;
       }
@@ -62,8 +62,13 @@ export default function FileUploader({ onFileLoaded }: FileUploaderProps) {
   };
 
   return (
-    <div className="flex flex-1 items-center justify-center p-8">
-      <div className="w-full max-w-xl">
+    <div className="flex flex-1 items-center justify-center p-4">
+      <div className="w-full">
+        {/* Title */}
+        <h3 className="text-sm font-medium text-zinc-400 mb-3 px-1">
+          Archivo local
+        </h3>
+
         {/* Drop zone */}
         <div
           onDrop={handleDrop}
@@ -71,7 +76,7 @@ export default function FileUploader({ onFileLoaded }: FileUploaderProps) {
           onDragLeave={handleDragLeave}
           onClick={() => inputRef.current?.click()}
           className={`
-            relative flex flex-col items-center justify-center gap-6 p-12
+            relative flex flex-col items-center justify-center gap-4 p-8
             rounded-2xl border-2 border-dashed cursor-pointer
             transition-all duration-200
             ${
@@ -86,8 +91,8 @@ export default function FileUploader({ onFileLoaded }: FileUploaderProps) {
             className={`transition-colors ${dragging ? "text-amber-400" : "text-zinc-600"}`}
           >
             <svg
-              width="64"
-              height="64"
+              width="48"
+              height="48"
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"
@@ -102,19 +107,19 @@ export default function FileUploader({ onFileLoaded }: FileUploaderProps) {
           </div>
 
           <div className="text-center">
-            <p className="text-lg text-zinc-300 mb-1">
+            <p className="text-sm text-zinc-300 mb-1">
               Arrastra tu tablatura aqui
             </p>
-            <p className="text-sm text-zinc-500">
-              o haz click para seleccionar un archivo
+            <p className="text-xs text-zinc-500">
+              o haz click para seleccionar
             </p>
           </div>
 
-          <div className="flex flex-wrap justify-center gap-2">
+          <div className="flex flex-wrap justify-center gap-1.5">
             {ACCEPTED_EXTENSIONS.map((ext) => (
               <span
                 key={ext}
-                className="px-2 py-0.5 rounded text-xs bg-zinc-800 text-zinc-400 font-mono"
+                className="px-1.5 py-0.5 rounded text-[10px] bg-zinc-800 text-zinc-400 font-mono"
               >
                 {ext}
               </span>
@@ -132,14 +137,14 @@ export default function FileUploader({ onFileLoaded }: FileUploaderProps) {
 
         {/* Error */}
         {error && (
-          <div className="mt-4 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm text-center">
+          <div className="mt-3 p-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-xs text-center">
             {error}
           </div>
         )}
 
         {/* Info */}
-        <p className="mt-6 text-center text-xs text-zinc-600">
-          El archivo se procesa localmente en tu navegador. No se sube a ningun servidor.
+        <p className="mt-4 text-center text-[10px] text-zinc-600">
+          Se procesa localmente. No se sube a ningun servidor.
         </p>
       </div>
     </div>

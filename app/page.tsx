@@ -3,6 +3,7 @@
 import { useState, useCallback } from "react";
 import TabPlayer from "./components/TabPlayer";
 import FileUploader from "./components/FileUploader";
+import TabBrowser from "./components/TabBrowser";
 
 interface LoadedFile {
   data: ArrayBuffer;
@@ -47,7 +48,17 @@ export default function Home() {
             onClose={handleClose}
           />
         ) : (
-          <FileUploader onFileLoaded={handleFileLoaded} />
+          <div className="flex flex-1 min-h-0">
+            {/* Left: Browser (70%) */}
+            <div className="flex-[7] min-h-0 flex flex-col border-r border-zinc-800">
+              <TabBrowser onTabLoaded={handleFileLoaded} />
+            </div>
+
+            {/* Right: Upload (30%) */}
+            <div className="flex-[3] min-h-0 flex flex-col">
+              <FileUploader onFileLoaded={handleFileLoaded} />
+            </div>
+          </div>
         )}
       </main>
     </div>

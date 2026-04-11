@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import ClarinetSVG from "./ClarinetSVG";
 import PianoRoll, { RollNote } from "./PianoRoll";
 import { KeyId, FINGERINGS, midiToClarinetWrittenNote } from "../lib/clarinet-fingerings";
+import { useClarinetAudio } from "../lib/use-clarinet-audio";
 
 interface TabPlayerProps {
   fileData: ArrayBuffer;
@@ -73,10 +74,15 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [tempo, setTempo] = useState(100);
+  const [muted, setMuted] = useState(false);
 
   const animRef = useRef<number>(0);
   const lastFrameRef = useRef<number>(0);
   const currentTimeRef = useRef(0);
+  // Track which note IDs have already been triggered so we don't replay them
+  const triggeredNotesRef = useRef<Set<number>>(new Set());
+
+  const audio = useClarinetAudio();
 
   useEffect(() => {
     setLoading(true);
@@ -111,14 +117,31 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
         currentTimeRef.current = 0;
         setCurrentTime(0);
         lastFrameRef.current = 0;
+        audio.stopAll();
+        triggeredNotesRef.current.clear();
         return;
+      }
+
+      // Trigger audio for notes that just became active
+      if (!muted && audio.ready) {
+        for (const note of song.notes) {
+          if (
+            next >= note.startTime &&
+            next < note.startTime + note.duration &&
+            !triggeredNotesRef.current.has(note.id)
+          ) {
+            triggeredNotesRef.current.add(note.id);
+            const durationSec = (note.duration / 1000) * (100 / tempo);
+            audio.playNote(note.midiPitch, durationSec);
+          }
+        }
       }
 
       currentTimeRef.current = next;
       setCurrentTime(next);
       animRef.current = requestAnimationFrame(tick);
     },
-    [song, tempo],
+    [song, tempo, audio, muted],
   );
 
   useEffect(() => {
@@ -152,7 +175,16 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
 
   const handlePlayPause = () => {
     if (!song) return;
-    setIsPlaying((p) => !p);
+    setIsPlaying((p) => {
+      if (p) {
+        // Pausing — stop all sounds
+        audio.stopAll();
+      } else {
+        // Resuming — clear triggered set so notes at current position can re-trigger
+        triggeredNotesRef.current.clear();
+      }
+      return !p;
+    });
   };
 
   const handleStop = () => {
@@ -160,12 +192,16 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
     currentTimeRef.current = 0;
     setCurrentTime(0);
     lastFrameRef.current = 0;
+    audio.stopAll();
+    triggeredNotesRef.current.clear();
   };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = Number(e.target.value);
     currentTimeRef.current = val;
     setCurrentTime(val);
+    audio.stopAll();
+    triggeredNotesRef.current.clear();
   };
 
   const formatTime = (ms: number) => {
@@ -216,6 +252,11 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
         <div className="flex items-center gap-4 text-sm text-zinc-400">
           <span>BPM: {song.tempo}</span>
           <span>{song.notes.length} notas</span>
+          {!audio.ready && (
+            <span className="text-amber-500 text-xs animate-pulse">
+              Cargando sonidos...
+            </span>
+          )}
           <button
             onClick={() => { handleStop(); onClose(); }}
             className="ml-2 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors"
@@ -271,6 +312,31 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
             <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
               <rect x="1" y="1" width="10" height="10" rx="1" />
             </svg>
+          </button>
+
+          {/* Mute toggle */}
+          <button
+            onClick={() => { setMuted((m) => !m); if (!muted) audio.stopAll(); }}
+            className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${
+              muted
+                ? "bg-red-500/20 text-red-400 hover:bg-red-500/30"
+                : "bg-zinc-700 text-zinc-300 hover:bg-zinc-600"
+            }`}
+            title={muted ? "Activar sonido" : "Silenciar"}
+          >
+            {muted ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                <line x1="23" y1="9" x2="17" y2="15" />
+                <line x1="17" y1="9" x2="23" y2="15" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+              </svg>
+            )}
           </button>
         </div>
 

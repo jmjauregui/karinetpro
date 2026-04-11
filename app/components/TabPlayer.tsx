@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ClarinetSVG from "./ClarinetSVG";
 import PianoRoll, { RollNote } from "./PianoRoll";
 import { KeyId, FINGERINGS, midiToClarinetWrittenNote } from "../lib/clarinet-fingerings";
@@ -12,57 +12,94 @@ interface TabPlayerProps {
   onClose: () => void;
 }
 
-interface ParsedSong {
-  title: string;
-  artist: string;
-  tempo: number;
+interface TrackInfo {
+  index: number;
+  name: string;
+  noteCount: number;
   notes: RollNote[];
   totalDuration: number;
 }
 
+interface ParsedSong {
+  title: string;
+  artist: string;
+  tempo: number;
+  tracks: TrackInfo[];
+}
+
 function parseSongFromBuffer(buffer: ArrayBuffer, fileName: string): Promise<ParsedSong> {
-  return import("guitarpro-parser").then(({ parseTabFile, beatDurationMs }) => {
+  return import("guitarpro-parser").then(({ parseTabFile, parseGp3File, beatDurationMs }) => {
     const data = new Uint8Array(buffer);
-    const song = parseTabFile(data, fileName);
 
-    const notes: RollNote[] = [];
-    let noteId = 0;
-
-    const track = song.tracks[0];
-    if (!track) throw new Error("No se encontraron pistas en el archivo");
-
-    let timeMs = 0;
-
-    for (const bar of track.bars) {
-      for (const beat of bar.beats) {
-        const durationMs = beatDurationMs(beat);
-
-        if (!beat.isRest && beat.notes.length > 0) {
-          for (const note of beat.notes) {
-            const stringMidi = track.tuningMidi[note.string] ?? 0;
-            const midiPitch = stringMidi + note.fret;
-
-            notes.push({
-              id: noteId++,
-              noteName: note.noteName,
-              midiPitch,
-              startTime: timeMs,
-              duration: durationMs,
-              barIndex: bar.index,
-            });
+    // GP4 is structurally similar to GP3. The library doesn't support it
+    // natively, so we detect the v4 header and use parseGp3File with a
+    // patched version string so the parser accepts it.
+    let song;
+    const headerLen = data[0];
+    if (headerLen > 10 && headerLen < 50 && data.byteLength > headerLen + 1) {
+      const versionStr = String.fromCharCode(...Array.from(data.subarray(1, 1 + Math.min(headerLen, 40))));
+      if (versionStr.includes("GUITAR PRO") && versionStr.includes("v4")) {
+        const patched = new Uint8Array(data);
+        // Replace "v4" with "v3" in the header so the GP3 parser accepts it
+        for (let i = 1; i < 1 + headerLen - 1; i++) {
+          if (patched[i] === 0x76 && patched[i + 1] === 0x34) { // "v4"
+            patched[i + 1] = 0x33; // "v3"
+            break;
           }
         }
-
-        timeMs += durationMs;
+        song = parseGp3File(patched);
       }
     }
+    if (!song) {
+      song = parseTabFile(data, fileName);
+    }
+
+    if (song.tracks.length === 0) throw new Error("No se encontraron pistas en el archivo");
+
+    let globalNoteId = 0;
+
+    const tracks: TrackInfo[] = song.tracks.map((track, trackIdx) => {
+      const notes: RollNote[] = [];
+      let timeMs = 0;
+
+      for (const bar of track.bars) {
+        for (const beat of bar.beats) {
+          const durationMs = beatDurationMs(beat);
+
+          if (!beat.isRest && beat.notes.length > 0) {
+            for (const note of beat.notes) {
+              const stringMidi = track.tuningMidi[note.string] ?? 0;
+              const midiPitch = stringMidi + note.fret;
+
+              notes.push({
+                id: globalNoteId++,
+                noteName: note.noteName,
+                midiPitch,
+                startTime: timeMs,
+                duration: durationMs,
+                barIndex: bar.index,
+              });
+            }
+          }
+
+          timeMs += durationMs;
+        }
+      }
+
+      return {
+        index: trackIdx,
+        name: track.name || `Pista ${trackIdx + 1}`,
+        noteCount: notes.length,
+        notes,
+        totalDuration: timeMs,
+      };
+    });
 
     return {
       title: song.title || fileName.replace(/\.\w+$/, ""),
       artist: song.artist || "Artista desconocido",
       tempo: song.tempo,
-      notes,
-      totalDuration: timeMs,
+      tracks,
     };
   });
 }
@@ -71,6 +108,7 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
   const [song, setSong] = useState<ParsedSong | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedTrack, setSelectedTrack] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [tempo, setTempo] = useState(100);
@@ -79,10 +117,11 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
   const animRef = useRef<number>(0);
   const lastFrameRef = useRef<number>(0);
   const currentTimeRef = useRef(0);
-  // Track which note IDs have already been triggered so we don't replay them
   const triggeredNotesRef = useRef<Set<number>>(new Set());
 
   const audio = useClarinetAudio();
+
+  const track = useMemo(() => song?.tracks[selectedTrack] ?? null, [song, selectedTrack]);
 
   useEffect(() => {
     setLoading(true);
@@ -90,6 +129,7 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
     parseSongFromBuffer(fileData, fileName)
       .then((parsed) => {
         setSong(parsed);
+        setSelectedTrack(0);
         setLoading(false);
       })
       .catch((err) => {
@@ -99,9 +139,20 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
       });
   }, [fileData, fileName]);
 
+  // Reset playback when switching tracks
+  const handleTrackChange = useCallback((idx: number) => {
+    setIsPlaying(false);
+    currentTimeRef.current = 0;
+    setCurrentTime(0);
+    lastFrameRef.current = 0;
+    audio.stopAll();
+    triggeredNotesRef.current.clear();
+    setSelectedTrack(idx);
+  }, [audio]);
+
   const tick = useCallback(
     (timestamp: number) => {
-      if (!song) return;
+      if (!track) return;
 
       if (lastFrameRef.current === 0) {
         lastFrameRef.current = timestamp;
@@ -112,7 +163,7 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
 
       const next = currentTimeRef.current + delta;
 
-      if (next >= song.totalDuration) {
+      if (next >= track.totalDuration) {
         setIsPlaying(false);
         currentTimeRef.current = 0;
         setCurrentTime(0);
@@ -122,9 +173,8 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
         return;
       }
 
-      // Trigger audio for notes that just became active
       if (!muted && audio.ready) {
-        for (const note of song.notes) {
+        for (const note of track.notes) {
           if (
             next >= note.startTime &&
             next < note.startTime + note.duration &&
@@ -141,7 +191,7 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
       setCurrentTime(next);
       animRef.current = requestAnimationFrame(tick);
     },
-    [song, tempo, audio, muted],
+    [track, tempo, audio, muted],
   );
 
   useEffect(() => {
@@ -154,8 +204,8 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
     return () => cancelAnimationFrame(animRef.current);
   }, [isPlaying, tick]);
 
-  const activeNotes = song
-    ? song.notes.filter(
+  const activeNotes = track
+    ? track.notes.filter(
         (n) => currentTime >= n.startTime && currentTime < n.startTime + n.duration,
       )
     : [];
@@ -174,13 +224,11 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
   }
 
   const handlePlayPause = () => {
-    if (!song) return;
+    if (!track) return;
     setIsPlaying((p) => {
       if (p) {
-        // Pausing — stop all sounds
         audio.stopAll();
       } else {
-        // Resuming — clear triggered set so notes at current position can re-trigger
         triggeredNotesRef.current.clear();
       }
       return !p;
@@ -239,19 +287,37 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
     );
   }
 
-  if (!song) return null;
+  if (!song || !track) return null;
 
   return (
     <div className="flex flex-col h-full">
-      {/* Top bar: Song info */}
+      {/* Top bar: Song info + track selector */}
       <div className="flex items-center justify-between px-6 py-3 border-b border-zinc-800 bg-zinc-900/80">
         <div>
           <h2 className="text-lg font-semibold text-zinc-100">{song.title}</h2>
           <p className="text-sm text-zinc-500">{song.artist}</p>
         </div>
         <div className="flex items-center gap-4 text-sm text-zinc-400">
+          {/* Track selector */}
+          <div className="flex items-center gap-2">
+            <label htmlFor="track-select" className="text-xs text-zinc-500">
+              Pista:
+            </label>
+            <select
+              id="track-select"
+              value={selectedTrack}
+              onChange={(e) => handleTrackChange(Number(e.target.value))}
+              className="bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1 text-sm text-zinc-200 focus:outline-none focus:border-amber-500 cursor-pointer"
+            >
+              {song.tracks.map((t) => (
+                <option key={t.index} value={t.index}>
+                  {t.name} ({t.noteCount} notas)
+                </option>
+              ))}
+            </select>
+          </div>
+
           <span>BPM: {song.tempo}</span>
-          <span>{song.notes.length} notas</span>
           {!audio.ready && (
             <span className="text-amber-500 text-xs animate-pulse">
               Cargando sonidos...
@@ -275,9 +341,9 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
         <div className="flex-1 overflow-hidden bg-zinc-950 flex flex-col">
           <div className="flex-1 overflow-hidden border-b border-zinc-800">
             <PianoRoll
-              notes={song.notes}
+              notes={track.notes}
               currentTime={currentTime}
-              totalDuration={song.totalDuration}
+              totalDuration={track.totalDuration}
               isPlaying={isPlaying}
             />
           </div>
@@ -314,7 +380,6 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
             </svg>
           </button>
 
-          {/* Mute toggle */}
           <button
             onClick={() => { setMuted((m) => !m); if (!muted) audio.stopAll(); }}
             className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${
@@ -347,13 +412,13 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
           <input
             type="range"
             min={0}
-            max={song.totalDuration}
+            max={track.totalDuration}
             value={currentTime}
             onChange={handleSeek}
             className="flex-1 h-1 accent-amber-400 cursor-pointer"
           />
           <span className="text-xs text-zinc-400 w-12 font-mono">
-            {formatTime(song.totalDuration)}
+            {formatTime(track.totalDuration)}
           </span>
         </div>
 

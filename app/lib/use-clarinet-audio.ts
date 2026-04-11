@@ -4,11 +4,8 @@ import { useRef, useEffect, useState, useCallback } from "react";
 import Soundfont from "soundfont-player";
 
 export interface ClarinetAudio {
-  /** True once the soundfont is loaded and ready to play */
   ready: boolean;
-  /** Play a MIDI note for a given duration (seconds) */
   playNote: (midi: number, duration: number) => void;
-  /** Stop all currently playing notes */
   stopAll: () => void;
 }
 
@@ -16,15 +13,15 @@ export function useClarinetAudio(): ClarinetAudio {
   const [ready, setReady] = useState(false);
   const instrumentRef = useRef<Soundfont.Player | null>(null);
   const acRef = useRef<AudioContext | null>(null);
-  // Track which MIDI notes are currently sounding so we don't re-trigger
   const activeNotesRef = useRef<Set<number>>(new Set());
 
   useEffect(() => {
     const ac = new AudioContext();
     acRef.current = ac;
 
+    // MusyngKite has higher quality, more realistic samples than FluidR3_GM
     Soundfont.instrument(ac, "clarinet" as Soundfont.InstrumentName, {
-      soundfont: "FluidR3_GM",
+      soundfont: "MusyngKite",
     }).then((player) => {
       instrumentRef.current = player;
       setReady(true);
@@ -40,16 +37,19 @@ export function useClarinetAudio(): ClarinetAudio {
     const ac = acRef.current;
     if (!inst || !ac) return;
 
-    // Don't re-trigger if this note is already sounding
     if (activeNotesRef.current.has(midi)) return;
     activeNotesRef.current.add(midi);
 
+    // ADSR tuned for clarinet: soft attack, full sustain, gentle release
     inst.play(String(midi), ac.currentTime, {
       duration: durationSec,
-      gain: 3,
+      gain: 4,
+      attack: 0.05,
+      decay: 0.1,
+      sustain: 0.9,
+      release: 0.3,
     });
 
-    // Remove from active set after duration
     setTimeout(() => {
       activeNotesRef.current.delete(midi);
     }, durationSec * 1000);

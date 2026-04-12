@@ -4,7 +4,8 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ClarinetSVG from "./ClarinetSVG";
 import PianoRoll, { RollNote } from "./PianoRoll";
 import { KeyId, FINGERINGS, midiToClarinetWrittenNote } from "../lib/clarinet-fingerings";
-import { useClarinetAudio } from "../lib/use-clarinet-audio";
+import { useMultiAudio, type TrackAudioState } from "../lib/use-multi-audio";
+import { addRecentFile } from "../lib/recent-files";
 import {
   isTabFavorite,
   toggleFavoriteTab,
@@ -26,12 +27,23 @@ interface TabPlayerProps {
   onFavoritesChanged?: () => void;
 }
 
+interface BarInfo {
+  index: number;
+  startTime: number;
+  endTime: number;
+  timeSignature: { numerator: number; denominator: number };
+  section?: string;
+}
+
 interface TrackInfo {
   index: number;
   name: string;
+  instrument: string | null;
   noteCount: number;
   notes: RollNote[];
   totalDuration: number;
+  bars: BarInfo[];
+  isPercussion: boolean;
 }
 
 interface ParsedSong {
@@ -45,19 +57,15 @@ function parseSongFromBuffer(buffer: ArrayBuffer, fileName: string): Promise<Par
   return import("guitarpro-parser").then(({ parseTabFile, parseGp3File, beatDurationMs }) => {
     const data = new Uint8Array(buffer);
 
-    // GP4 is structurally similar to GP3. The library doesn't support it
-    // natively, so we detect the v4 header and use parseGp3File with a
-    // patched version string so the parser accepts it.
     let song;
     const headerLen = data[0];
     if (headerLen > 10 && headerLen < 50 && data.byteLength > headerLen + 1) {
       const versionStr = String.fromCharCode(...Array.from(data.subarray(1, 1 + Math.min(headerLen, 40))));
       if (versionStr.includes("GUITAR PRO") && versionStr.includes("v4")) {
         const patched = new Uint8Array(data);
-        // Replace "v4" with "v3" in the header so the GP3 parser accepts it
         for (let i = 1; i < 1 + headerLen - 1; i++) {
-          if (patched[i] === 0x76 && patched[i + 1] === 0x34) { // "v4"
-            patched[i + 1] = 0x33; // "v3"
+          if (patched[i] === 0x76 && patched[i + 1] === 0x34) {
+            patched[i + 1] = 0x33;
             break;
           }
         }
@@ -74,9 +82,12 @@ function parseSongFromBuffer(buffer: ArrayBuffer, fileName: string): Promise<Par
 
     const tracks: TrackInfo[] = song.tracks.map((track, trackIdx) => {
       const notes: RollNote[] = [];
+      const bars: BarInfo[] = [];
       let timeMs = 0;
 
       for (const bar of track.bars) {
+        const barStart = timeMs;
+
         for (const beat of bar.beats) {
           const durationMs = beatDurationMs(beat);
 
@@ -98,14 +109,33 @@ function parseSongFromBuffer(buffer: ArrayBuffer, fileName: string): Promise<Par
 
           timeMs += durationMs;
         }
+
+        bars.push({
+          index: bar.index,
+          startTime: barStart,
+          endTime: timeMs,
+          timeSignature: bar.timeSignature,
+          section: bar.section?.text,
+        });
       }
+
+      // Detect percussion: channel 10 is percussion in GM, or name hints
+      const isPercussion =
+        track.instrument?.includes("MIDI 0") === false &&
+        (track.name.toLowerCase().includes("drum") ||
+          track.name.toLowerCase().includes("perc") ||
+          track.name.toLowerCase().includes("batería") ||
+          track.name.toLowerCase().includes("bater"));
 
       return {
         index: trackIdx,
         name: track.name || `Pista ${trackIdx + 1}`,
+        instrument: track.instrument,
         noteCount: notes.length,
         notes,
         totalDuration: timeMs,
+        bars,
+        isPercussion,
       };
     });
 
@@ -126,20 +156,63 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [tempo, setTempo] = useState(100);
-  const [muted, setMuted] = useState(false);
   const [isFav, setIsFav] = useState(
     sourceInfo ? isTabFavorite(sourceInfo.artistSlug, sourceInfo.songSlug) : false,
   );
 
+  // Transposition in semitones
+  const [transpose, setTranspose] = useState(0);
+
+  // Loop A-B
+  const [loopA, setLoopA] = useState<number | null>(null);
+  const [loopB, setLoopB] = useState<number | null>(null);
+
+  // Metronome
+  const [metronomeOn, setMetronomeOn] = useState(false);
+
+  // Mixer panel visibility
+  const [showMixer, setShowMixer] = useState(false);
+
   const animRef = useRef<number>(0);
   const lastFrameRef = useRef<number>(0);
   const currentTimeRef = useRef(0);
-  const triggeredNotesRef = useRef<Set<number>>(new Set());
+  const triggeredNotesRef = useRef<Set<string>>(new Set());
+  const metronomeBarRef = useRef(-1);
+  const metronomeBeatRef = useRef(-1);
+  const metronomeAcRef = useRef<AudioContext | null>(null);
 
-  const audio = useClarinetAudio();
+  const trackDefs = useMemo(
+    () =>
+      song?.tracks.map((t) => ({
+        instrumentStr: t.instrument,
+        isPercussion: t.isPercussion,
+      })) ?? [],
+    [song],
+  );
+
+  const audio = useMultiAudio(trackDefs);
 
   const track = useMemo(() => song?.tracks[selectedTrack] ?? null, [song, selectedTrack]);
 
+  // Max duration across all tracks
+  const maxDuration = useMemo(() => {
+    if (!song) return 0;
+    return Math.max(...song.tracks.map((t) => t.totalDuration));
+  }, [song]);
+
+  // Sections from current track for navigation
+  const sections = useMemo(() => {
+    if (!track) return [];
+    return track.bars.filter((b) => b.section).map((b) => ({ label: b.section!, time: b.startTime, bar: b.index }));
+  }, [track]);
+
+  // Current bar info
+  const currentBar = useMemo(() => {
+    if (!track) return null;
+    return track.bars.find((b) => currentTime >= b.startTime && currentTime < b.endTime) ?? track.bars[0] ?? null;
+  }, [track, currentTime]);
+
+  // Save to recent files on load
   useEffect(() => {
     setLoading(true);
     setError(null);
@@ -148,13 +221,20 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
         setSong(parsed);
         setSelectedTrack(0);
         setLoading(false);
+        addRecentFile({
+          fileName,
+          artistSlug: sourceInfo?.artistSlug,
+          artistName: sourceInfo?.artistName,
+          songSlug: sourceInfo?.songSlug,
+          songName: sourceInfo?.songName,
+        });
       })
       .catch((err) => {
         console.error("Error parsing tab:", err);
         setError(err.message);
         setLoading(false);
       });
-  }, [fileData, fileName]);
+  }, [fileData, fileName, sourceInfo]);
 
   // Reset playback when switching tracks
   const handleTrackChange = useCallback((idx: number) => {
@@ -167,9 +247,39 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
     setSelectedTrack(idx);
   }, [audio]);
 
+  // Determine which tracks should actually play sound
+  const shouldTrackPlay = useCallback(
+    (trackIdx: number): boolean => {
+      const states = audio.trackStates;
+      if (!states[trackIdx]) return false;
+      if (states[trackIdx].muted) return false;
+      const anySolo = states.some((s) => s.solo);
+      if (anySolo && !states[trackIdx].solo) return false;
+      return true;
+    },
+    [audio.trackStates],
+  );
+
+  // Metronome click
+  const playMetronomeClick = useCallback((isDownbeat: boolean) => {
+    if (!metronomeAcRef.current) {
+      metronomeAcRef.current = new AudioContext();
+    }
+    const ac = metronomeAcRef.current;
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.connect(gain);
+    gain.connect(ac.destination);
+    osc.frequency.value = isDownbeat ? 1000 : 800;
+    gain.gain.value = isDownbeat ? 0.3 : 0.15;
+    osc.start(ac.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.08);
+    osc.stop(ac.currentTime + 0.08);
+  }, []);
+
   const tick = useCallback(
     (timestamp: number) => {
-      if (!track) return;
+      if (!song) return;
 
       if (lastFrameRef.current === 0) {
         lastFrameRef.current = timestamp;
@@ -178,9 +288,18 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
       const delta = (timestamp - lastFrameRef.current) * (tempo / 100);
       lastFrameRef.current = timestamp;
 
-      const next = currentTimeRef.current + delta;
+      let next = currentTimeRef.current + delta;
 
-      if (next >= track.totalDuration) {
+      // Loop A-B
+      if (loopA !== null && loopB !== null && next >= loopB) {
+        next = loopA;
+        triggeredNotesRef.current.clear();
+        audio.stopAll();
+        metronomeBarRef.current = -1;
+        metronomeBeatRef.current = -1;
+      }
+
+      if (next >= maxDuration) {
         setIsPlaying(false);
         currentTimeRef.current = 0;
         setCurrentTime(0);
@@ -190,16 +309,38 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
         return;
       }
 
-      if (!muted && audio.ready) {
-        for (const note of track.notes) {
-          if (
-            next >= note.startTime &&
-            next < note.startTime + note.duration &&
-            !triggeredNotesRef.current.has(note.id)
-          ) {
-            triggeredNotesRef.current.add(note.id);
-            const durationSec = (note.duration / 1000) * (100 / tempo);
-            audio.playNote(note.midiPitch, durationSec);
+      // Play notes from ALL active tracks
+      if (audio.ready) {
+        for (let ti = 0; ti < song.tracks.length; ti++) {
+          if (!shouldTrackPlay(ti)) continue;
+          const vol = audio.trackStates[ti]?.volume ?? 0.8;
+          for (const note of song.tracks[ti].notes) {
+            if (
+              next >= note.startTime &&
+              next < note.startTime + note.duration
+            ) {
+              const key = `${ti}-${note.id}`;
+              if (!triggeredNotesRef.current.has(key)) {
+                triggeredNotesRef.current.add(key);
+                const durationSec = (note.duration / 1000) * (100 / tempo);
+                audio.playNote(ti, note.midiPitch + (ti === selectedTrack ? transpose : 0), durationSec * vol);
+              }
+            }
+          }
+        }
+      }
+
+      // Metronome
+      if (metronomeOn && track) {
+        const bar = track.bars.find((b) => next >= b.startTime && next < b.endTime);
+        if (bar) {
+          const barDuration = bar.endTime - bar.startTime;
+          const beatDuration = barDuration / bar.timeSignature.numerator;
+          const beatInBar = Math.floor((next - bar.startTime) / beatDuration);
+          if (bar.index !== metronomeBarRef.current || beatInBar !== metronomeBeatRef.current) {
+            metronomeBarRef.current = bar.index;
+            metronomeBeatRef.current = beatInBar;
+            playMetronomeClick(beatInBar === 0);
           }
         }
       }
@@ -208,7 +349,7 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
       setCurrentTime(next);
       animRef.current = requestAnimationFrame(tick);
     },
-    [track, tempo, audio, muted],
+    [song, track, tempo, audio, shouldTrackPlay, selectedTrack, transpose, loopA, loopB, maxDuration, metronomeOn, playMetronomeClick],
   );
 
   useEffect(() => {
@@ -221,8 +362,14 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
     return () => cancelAnimationFrame(animRef.current);
   }, [isPlaying, tick]);
 
+  // Transposed notes for display
+  const displayNotes = useMemo(() => {
+    if (!track || transpose === 0) return track?.notes ?? [];
+    return track.notes.map((n) => ({ ...n, midiPitch: n.midiPitch + transpose }));
+  }, [track, transpose]);
+
   const activeNotes = track
-    ? track.notes.filter(
+    ? displayNotes.filter(
         (n) => currentTime >= n.startTime && currentTime < n.startTime + n.duration,
       )
     : [];
@@ -240,26 +387,30 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
     }
   }
 
-  const handlePlayPause = () => {
-    if (!track) return;
+  const handlePlayPause = useCallback(() => {
+    if (!song) return;
     setIsPlaying((p) => {
       if (p) {
         audio.stopAll();
       } else {
         triggeredNotesRef.current.clear();
+        metronomeBarRef.current = -1;
+        metronomeBeatRef.current = -1;
       }
       return !p;
     });
-  };
+  }, [song, audio]);
 
-  const handleStop = () => {
+  const handleStop = useCallback(() => {
     setIsPlaying(false);
     currentTimeRef.current = 0;
     setCurrentTime(0);
     lastFrameRef.current = 0;
     audio.stopAll();
     triggeredNotesRef.current.clear();
-  };
+    metronomeBarRef.current = -1;
+    metronomeBeatRef.current = -1;
+  }, [audio]);
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = Number(e.target.value);
@@ -268,6 +419,63 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
     audio.stopAll();
     triggeredNotesRef.current.clear();
   };
+
+  const seekTo = useCallback((timeMs: number) => {
+    const clamped = Math.max(0, Math.min(maxDuration, timeMs));
+    currentTimeRef.current = clamped;
+    setCurrentTime(clamped);
+    audio.stopAll();
+    triggeredNotesRef.current.clear();
+  }, [maxDuration, audio]);
+
+  const seekBy = useCallback((deltaMs: number) => {
+    seekTo(currentTimeRef.current + deltaMs);
+  }, [seekTo]);
+
+  // Loop A-B toggle
+  const handleLoopToggle = useCallback(() => {
+    if (loopA === null) {
+      setLoopA(currentTimeRef.current);
+    } else if (loopB === null) {
+      const b = currentTimeRef.current;
+      if (b > loopA) {
+        setLoopB(b);
+      } else {
+        // B before A: swap
+        setLoopB(loopA);
+        setLoopA(b);
+      }
+    } else {
+      // Clear loop
+      setLoopA(null);
+      setLoopB(null);
+    }
+  }, [loopA, loopB]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
+      if (e.code === "Space") {
+        e.preventDefault();
+        handlePlayPause();
+      } else if (e.code === "ArrowLeft") {
+        e.preventDefault();
+        seekBy(-2000);
+      } else if (e.code === "ArrowRight") {
+        e.preventDefault();
+        seekBy(2000);
+      } else if (e.code === "KeyL") {
+        e.preventDefault();
+        handleLoopToggle();
+      } else if (e.code === "KeyM") {
+        e.preventDefault();
+        setMetronomeOn((m) => !m);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [handlePlayPause, seekBy, handleLoopToggle]);
 
   const formatTime = (ms: number) => {
     const s = Math.floor(ms / 1000);
@@ -306,37 +514,55 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
 
   if (!song || !track) return null;
 
+  const loopActive = loopA !== null && loopB !== null;
+
   return (
     <div className="flex flex-col h-full">
-      {/* Top bar: Song info + track selector */}
-      <div className="flex items-center justify-between px-6 py-3 border-b border-zinc-800 bg-zinc-900/80">
-        <div>
-          <h2 className="text-lg font-semibold text-zinc-100">{song.title}</h2>
-          <p className="text-sm text-zinc-500">{song.artist}</p>
+      {/* Top bar */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-800 bg-zinc-900/80">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold text-zinc-100 truncate">{song.title}</h2>
+          <p className="text-sm text-zinc-500 truncate">{song.artist}</p>
         </div>
-        <div className="flex items-center gap-4 text-sm text-zinc-400">
-          {/* Track selector */}
-          <div className="flex items-center gap-2">
-            <label htmlFor="track-select" className="text-xs text-zinc-500">
-              Pista:
-            </label>
+        <div className="flex items-center gap-3 text-sm text-zinc-400 shrink-0">
+          {/* Track selector (main view track) */}
+          <div className="flex items-center gap-1.5">
+            <label htmlFor="track-select" className="text-xs text-zinc-500">Vista:</label>
             <select
               id="track-select"
               value={selectedTrack}
               onChange={(e) => handleTrackChange(Number(e.target.value))}
-              className="bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1 text-sm text-zinc-200 focus:outline-none focus:border-amber-500 cursor-pointer"
+              className="bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-amber-500 cursor-pointer max-w-[180px]"
             >
               {song.tracks.map((t) => (
                 <option key={t.index} value={t.index}>
-                  {t.name} ({t.noteCount} notas)
+                  {t.name} ({t.noteCount})
                 </option>
               ))}
             </select>
           </div>
 
-          <span>BPM: {song.tempo}</span>
+          <span className="text-xs">BPM: {song.tempo}</span>
 
-          {/* Favorite button */}
+          {/* Bar / section indicator */}
+          {currentBar && (
+            <span className="text-xs text-zinc-500">
+              C.{currentBar.index + 1}
+              {currentBar.section && <span className="text-amber-400 ml-1">{currentBar.section}</span>}
+              <span className="ml-1 text-zinc-600">{currentBar.timeSignature.numerator}/{currentBar.timeSignature.denominator}</span>
+            </span>
+          )}
+
+          {/* Mixer toggle */}
+          <button
+            onClick={() => setShowMixer((s) => !s)}
+            className={`px-2 py-1 rounded text-xs transition-colors ${showMixer ? "bg-amber-500/20 text-amber-400" : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"}`}
+            title="Mezclador de pistas"
+          >
+            Mixer
+          </button>
+
+          {/* Favorite */}
           {sourceInfo && (
             <button
               onClick={() => {
@@ -349,76 +575,152 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
                 setIsFav(added);
                 onFavoritesChanged?.();
               }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-colors ${
-                isFav
-                  ? "bg-pink-500/20 text-pink-400 hover:bg-pink-500/30"
-                  : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-pink-400"
+              className={`px-2 py-1 rounded text-xs transition-colors ${
+                isFav ? "bg-pink-500/20 text-pink-400" : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
               }`}
               title={isFav ? "Quitar de favoritos" : "Agregar a favoritos"}
             >
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill={isFav ? "currentColor" : "none"}
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
-              </svg>
-              {isFav ? "Favorito" : "Agregar a favoritos"}
+              {isFav ? "Fav" : "+Fav"}
             </button>
           )}
 
           {!audio.ready && (
             <span className="text-amber-500 text-xs animate-pulse">
-              Cargando sonidos...
+              Cargando ({audio.loadingInstruments}/{audio.totalInstruments})...
             </span>
           )}
+
           <button
             onClick={() => { handleStop(); onClose(); }}
-            className="ml-2 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors"
+            className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors"
           >
-            Cambiar archivo
+            Cerrar
           </button>
         </div>
       </div>
 
-      {/* Main area: Clarinet + Piano Roll */}
+      {/* Section navigation bar */}
+      {sections.length > 0 && (
+        <div className="flex items-center gap-1 px-4 py-1.5 border-b border-zinc-800 bg-zinc-900/50 overflow-x-auto">
+          <span className="text-[10px] text-zinc-600 mr-1">Secciones:</span>
+          {sections.map((s, i) => (
+            <button
+              key={i}
+              onClick={() => seekTo(s.time)}
+              className={`px-2 py-0.5 rounded text-[10px] transition-colors ${
+                currentBar && currentBar.section === s.label
+                  ? "bg-amber-500/20 text-amber-400"
+                  : "bg-zinc-800 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700"
+              }`}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Main area */}
       <div className="flex flex-1 min-h-0">
+        {/* Clarinet + current note display */}
         <div className="w-40 shrink-0 flex flex-col items-center py-4 border-r border-zinc-800 bg-zinc-950/60 overflow-y-auto">
+          {/* Large note name */}
+          <div className="mb-2 text-center">
+            <div className="text-3xl font-bold text-amber-400 min-h-[40px]">
+              {displayNote || "-"}
+            </div>
+            {transpose !== 0 && (
+              <div className="text-[10px] text-zinc-500">
+                Transp: {transpose > 0 ? "+" : ""}{transpose}
+              </div>
+            )}
+          </div>
           <ClarinetSVG activeKeys={activeKeys} noteName={displayNote} />
         </div>
 
+        {/* Piano Roll + Mixer */}
         <div className="flex-1 overflow-hidden bg-zinc-950 flex flex-col">
           <div className="flex-1 overflow-hidden border-b border-zinc-800">
             <PianoRoll
-              notes={track.notes}
+              notes={displayNotes}
               currentTime={currentTime}
               totalDuration={track.totalDuration}
               isPlaying={isPlaying}
+              loopA={loopA}
+              loopB={loopB}
+              bars={track.bars}
+              onSeek={seekTo}
             />
           </div>
         </div>
+
+        {/* Mixer panel */}
+        {showMixer && (
+          <div className="w-56 shrink-0 border-l border-zinc-800 bg-zinc-900/80 overflow-y-auto">
+            <div className="px-3 py-2 border-b border-zinc-800">
+              <span className="text-xs font-semibold text-zinc-300">Mezclador</span>
+            </div>
+            {song.tracks.map((t, i) => {
+              const st = audio.trackStates[i];
+              if (!st) return null;
+              return (
+                <div
+                  key={i}
+                  className={`px-3 py-2 border-b border-zinc-800/50 ${i === selectedTrack ? "bg-amber-500/5" : ""}`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] text-zinc-300 truncate max-w-[100px]" title={t.name}>
+                      {t.name}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => audio.setTrackMuted(i, !st.muted)}
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                          st.muted ? "bg-red-500/30 text-red-400" : "bg-zinc-800 text-zinc-500 hover:text-zinc-300"
+                        }`}
+                      >
+                        M
+                      </button>
+                      <button
+                        onClick={() => audio.setTrackSolo(i, !st.solo)}
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                          st.solo ? "bg-amber-500/30 text-amber-400" : "bg-zinc-800 text-zinc-500 hover:text-zinc-300"
+                        }`}
+                      >
+                        S
+                      </button>
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={Math.round(st.volume * 100)}
+                    onChange={(e) => audio.setTrackVolume(i, Number(e.target.value) / 100)}
+                    className="w-full h-1 accent-amber-400 cursor-pointer"
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Bottom: Transport controls */}
-      <div className="px-6 py-3 border-t border-zinc-800 bg-zinc-900/80 flex items-center gap-4">
-        <div className="flex items-center gap-2">
+      <div className="px-4 py-2 border-t border-zinc-800 bg-zinc-900/80 flex items-center gap-3">
+        {/* Transport buttons */}
+        <div className="flex items-center gap-1.5">
           <button
             onClick={handlePlayPause}
-            className="w-10 h-10 rounded-full bg-amber-500 hover:bg-amber-400 text-black flex items-center justify-center transition-colors"
-            title={isPlaying ? "Pausar" : "Reproducir"}
+            className="w-9 h-9 rounded-full bg-amber-500 hover:bg-amber-400 text-black flex items-center justify-center transition-colors"
+            title={isPlaying ? "Pausar (Espacio)" : "Reproducir (Espacio)"}
           >
             {isPlaying ? (
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                 <rect x="3" y="2" width="4" height="12" rx="1" />
                 <rect x="9" y="2" width="4" height="12" rx="1" />
               </svg>
             ) : (
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                 <path d="M4 2l10 6-10 6V2z" />
               </svg>
             )}
@@ -426,68 +728,124 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
 
           <button
             onClick={handleStop}
-            className="w-8 h-8 rounded-full bg-zinc-700 hover:bg-zinc-600 text-zinc-300 flex items-center justify-center transition-colors"
+            className="w-7 h-7 rounded-full bg-zinc-700 hover:bg-zinc-600 text-zinc-300 flex items-center justify-center transition-colors"
             title="Detener"
           >
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+            <svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor">
               <rect x="1" y="1" width="10" height="10" rx="1" />
             </svg>
           </button>
 
+          {/* Metronome */}
           <button
-            onClick={() => { setMuted((m) => !m); if (!muted) audio.stopAll(); }}
-            className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${
-              muted
-                ? "bg-red-500/20 text-red-400 hover:bg-red-500/30"
-                : "bg-zinc-700 text-zinc-300 hover:bg-zinc-600"
+            onClick={() => setMetronomeOn((m) => !m)}
+            className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors text-[10px] font-bold ${
+              metronomeOn ? "bg-green-500/20 text-green-400" : "bg-zinc-700 text-zinc-500 hover:text-zinc-300"
             }`}
-            title={muted ? "Activar sonido" : "Silenciar"}
+            title={`Metrónomo (M) ${metronomeOn ? "ON" : "OFF"}`}
           >
-            {muted ? (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-                <line x1="23" y1="9" x2="17" y2="15" />
-                <line x1="17" y1="9" x2="23" y2="15" />
-              </svg>
-            ) : (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-                <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
-                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-              </svg>
-            )}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2L8 22h8L12 2z" />
+              <path d="M12 8l4-3" />
+            </svg>
+          </button>
+
+          {/* Loop A-B */}
+          <button
+            onClick={handleLoopToggle}
+            className={`px-2 h-7 rounded-full flex items-center justify-center transition-colors text-[10px] font-bold ${
+              loopActive
+                ? "bg-purple-500/20 text-purple-400"
+                : loopA !== null
+                ? "bg-purple-500/10 text-purple-300 animate-pulse"
+                : "bg-zinc-700 text-zinc-500 hover:text-zinc-300"
+            }`}
+            title={
+              loopA === null
+                ? "Marcar punto A (L)"
+                : loopB === null
+                ? "Marcar punto B (L)"
+                : "Quitar loop (L)"
+            }
+          >
+            {loopA === null ? "A-B" : loopB === null ? "B?" : "A-B"}
           </button>
         </div>
 
-        <div className="flex items-center gap-3 flex-1">
-          <span className="text-xs text-zinc-400 w-12 text-right font-mono">
+        {/* Timeline */}
+        <div className="flex items-center gap-2 flex-1">
+          <span className="text-xs text-zinc-400 w-10 text-right font-mono">
             {formatTime(currentTime)}
           </span>
-          <input
-            type="range"
-            min={0}
-            max={track.totalDuration}
-            value={currentTime}
-            onChange={handleSeek}
-            className="flex-1 h-1 accent-amber-400 cursor-pointer"
-          />
-          <span className="text-xs text-zinc-400 w-12 font-mono">
-            {formatTime(track.totalDuration)}
+          <div className="flex-1 relative">
+            <input
+              type="range"
+              min={0}
+              max={maxDuration}
+              value={currentTime}
+              onChange={handleSeek}
+              className="w-full h-1 accent-amber-400 cursor-pointer"
+            />
+            {/* Loop markers on timeline */}
+            {loopA !== null && (
+              <div
+                className="absolute top-0 h-full w-0.5 bg-purple-400 pointer-events-none"
+                style={{ left: `${(loopA / maxDuration) * 100}%` }}
+              />
+            )}
+            {loopB !== null && (
+              <div
+                className="absolute top-0 h-full w-0.5 bg-purple-400 pointer-events-none"
+                style={{ left: `${(loopB / maxDuration) * 100}%` }}
+              />
+            )}
+          </div>
+          <span className="text-xs text-zinc-400 w-10 font-mono">
+            {formatTime(maxDuration)}
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-zinc-500">Tempo:</span>
+        {/* Tempo */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] text-zinc-500">Tempo:</span>
           <input
             type="range"
             min={25}
             max={200}
             value={tempo}
             onChange={(e) => setTempo(Number(e.target.value))}
-            className="w-24 h-1 accent-amber-400 cursor-pointer"
+            className="w-20 h-1 accent-amber-400 cursor-pointer"
           />
-          <span className="text-xs text-zinc-400 w-10 font-mono">{tempo}%</span>
+          <span className="text-[10px] text-zinc-400 w-8 font-mono">{tempo}%</span>
         </div>
+
+        {/* Transposition */}
+        <div className="flex items-center gap-1">
+          <span className="text-[10px] text-zinc-500">Transp:</span>
+          <button
+            onClick={() => setTranspose((t) => t - 1)}
+            className="w-5 h-5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 flex items-center justify-center text-xs"
+          >
+            -
+          </button>
+          <span className="text-[10px] text-zinc-300 w-6 text-center font-mono">
+            {transpose > 0 ? "+" : ""}{transpose}
+          </span>
+          <button
+            onClick={() => setTranspose((t) => t + 1)}
+            className="w-5 h-5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 flex items-center justify-center text-xs"
+          >
+            +
+          </button>
+        </div>
+      </div>
+
+      {/* Keyboard shortcuts help */}
+      <div className="px-4 py-1 border-t border-zinc-800/50 bg-zinc-950/80 flex items-center gap-4 text-[9px] text-zinc-600">
+        <span>Espacio: Play/Pausa</span>
+        <span>Flechas: -/+2s</span>
+        <span>L: Loop A-B</span>
+        <span>M: Metrónomo</span>
       </div>
     </div>
   );

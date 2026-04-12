@@ -7,6 +7,7 @@ import {
   type FavoriteArtist,
   type FavoriteTab,
 } from "../lib/favorites";
+import { getRecentFiles, type RecentFile } from "../lib/recent-files";
 import type { TabSourceInfo } from "./TabPlayer";
 
 interface TabBrowserProps {
@@ -59,9 +60,11 @@ export default function TabBrowser({ onTabLoaded, favVersion }: TabBrowserProps)
   // Read favorites from localStorage (re-read when favVersion changes)
   const [favArtists, setFavArtists] = useState<FavoriteArtist[]>([]);
   const [favTabsForArtist, setFavTabsForArtist] = useState<FavoriteTab[]>([]);
+  const [recentFiles, setRecentFiles] = useState<RecentFile[]>([]);
 
   useEffect(() => {
     setFavArtists(getFavoriteArtists());
+    setRecentFiles(getRecentFiles());
   }, [favVersion]);
 
   useEffect(() => {
@@ -299,6 +302,67 @@ export default function TabBrowser({ onTabLoaded, favVersion }: TabBrowserProps)
                             </span>
                           ) : null;
                         })()}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ── Recent files section ── */}
+            {recentFiles.length > 0 && (
+              <div className="mt-6">
+                <div className="flex items-center gap-2 mb-3">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-400">
+                    <circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" />
+                  </svg>
+                  <h3 className="text-sm font-medium text-zinc-300">Recientes</h3>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                  {recentFiles.filter((r) => r.artistSlug && r.songSlug).map((recent, i) => (
+                    <button
+                      key={`${recent.artistSlug}-${recent.songSlug}-${i}`}
+                      onClick={async () => {
+                        if (!recent.artistSlug || !recent.songSlug) return;
+                        setDownloading(recent.songSlug);
+                        setError(null);
+                        try {
+                          const res = await fetch(`/api/tabs/download?artist=${recent.artistSlug}&song=${recent.songSlug}`);
+                          if (!res.ok) {
+                            const errData = await res.json().catch(() => null);
+                            throw new Error(errData?.error || `Error ${res.status}`);
+                          }
+                          const buffer = await res.arrayBuffer();
+                          const disposition = res.headers.get("content-disposition");
+                          let fName = `${recent.artistSlug}-${recent.songSlug}.gp`;
+                          if (disposition) {
+                            const match = disposition.match(/filename[^;=\n]*=["']?([^"';\n]+)/);
+                            if (match?.[1]) fName = match[1];
+                          }
+                          onTabLoaded(buffer, fName, {
+                            artistSlug: recent.artistSlug,
+                            artistName: recent.artistName ?? "",
+                            songSlug: recent.songSlug,
+                            songName: recent.songName ?? recent.fileName,
+                          });
+                        } catch (err) {
+                          setError((err as Error).message);
+                        } finally {
+                          setDownloading(null);
+                        }
+                      }}
+                      className="flex items-center gap-3 p-3 rounded-lg bg-zinc-800/30 border border-zinc-800 hover:bg-zinc-800 hover:border-zinc-700 transition-all text-left group"
+                    >
+                      <div className="w-10 h-10 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-500 text-xs font-bold shrink-0">
+                        {recent.artistName?.[0]?.toUpperCase() ?? "?"}
+                      </div>
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-zinc-300 group-hover:text-amber-400 transition-colors truncate text-sm">
+                          {recent.songName ?? recent.fileName}
+                        </span>
+                        <span className="text-[11px] text-zinc-600 truncate">
+                          {recent.artistName ?? ""}
+                        </span>
                       </div>
                     </button>
                   ))}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useEffect, useMemo } from "react";
+import { useRef, useEffect, useMemo, useCallback } from "react";
 
 export interface RollNote {
   id: number;
@@ -11,11 +11,23 @@ export interface RollNote {
   barIndex: number;
 }
 
+interface BarInfo {
+  index: number;
+  startTime: number;
+  endTime: number;
+  timeSignature: { numerator: number; denominator: number };
+  section?: string;
+}
+
 interface PianoRollProps {
   notes: RollNote[];
   currentTime: number; // ms
   totalDuration: number;
   isPlaying: boolean;
+  loopA?: number | null;
+  loopB?: number | null;
+  bars?: BarInfo[];
+  onSeek?: (timeMs: number) => void;
 }
 
 const NOTE_NAMES_SHARPS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -26,32 +38,30 @@ function midiToLabel(midi: number): string {
   return `${note}${octave}`;
 }
 
-// Color palette for note bars (inspired by the image)
 const NOTE_COLORS: Record<string, string> = {
-  C: "#f472b6",  // pink
+  C: "#f472b6",
   "C#": "#f472b6",
-  D: "#facc15",  // yellow
+  D: "#facc15",
   "D#": "#facc15",
   E: "#facc15",
-  F: "#4ade80",  // green
+  F: "#4ade80",
   "F#": "#4ade80",
-  G: "#60a5fa",  // blue
+  G: "#60a5fa",
   "G#": "#60a5fa",
   A: "#f472b6",
   "A#": "#f472b6",
-  B: "#c084fc",  // purple
+  B: "#c084fc",
 };
 
 function getNoteColor(noteName: string): string {
-  // Strip octave
   const base = noteName.replace(/\d+/g, "");
   return NOTE_COLORS[base] ?? "#facc15";
 }
 
-export default function PianoRoll({ notes, currentTime, totalDuration, isPlaying }: PianoRollProps) {
+export default function PianoRoll({ notes, currentTime, totalDuration, isPlaying, loopA, loopB, bars, onSeek }: PianoRollProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const LABEL_WIDTH = 56; // w-14
 
-  // Compute pitch range
   const { minPitch, maxPitch } = useMemo(() => {
     if (notes.length === 0) return { minPitch: 48, maxPitch: 84 };
     let min = Infinity;
@@ -65,11 +75,9 @@ export default function PianoRoll({ notes, currentTime, totalDuration, isPlaying
 
   const pitchRange = maxPitch - minPitch + 1;
   const ROW_HEIGHT = 20;
-  const MS_PER_PX = 8; // how many ms per pixel horizontally
+  const MS_PER_PX = 8;
   const VISIBLE_WIDTH_PX = 900;
-  const VISIBLE_MS = VISIBLE_WIDTH_PX * MS_PER_PX;
 
-  // Auto-scroll to keep current time centered
   useEffect(() => {
     if (containerRef.current) {
       const scrollX = (currentTime / MS_PER_PX) - VISIBLE_WIDTH_PX / 3;
@@ -80,20 +88,24 @@ export default function PianoRoll({ notes, currentTime, totalDuration, isPlaying
   const totalWidthPx = Math.max(VISIBLE_WIDTH_PX, totalDuration / MS_PER_PX + 200);
   const playheadX = currentTime / MS_PER_PX;
 
-  return (
-    <div className="flex flex-col w-full">
-      {/* Header bar labels */}
-      <div className="flex">
-        {/* Pitch labels column */}
-        <div className="w-14 shrink-0" />
-        {/* Scrollable header - no content needed */}
-        <div className="flex-1" />
-      </div>
+  // Click to seek
+  const handleClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (!onSeek || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const clickX = e.clientX - rect.left + containerRef.current.scrollLeft;
+      const timeMs = clickX * MS_PER_PX;
+      onSeek(Math.max(0, Math.min(totalDuration, timeMs)));
+    },
+    [onSeek, totalDuration],
+  );
 
-      <div className="flex">
+  return (
+    <div className="flex flex-col w-full h-full">
+      <div className="flex flex-1 min-h-0">
         {/* Pitch labels */}
         <div
-          className="w-14 shrink-0 flex flex-col-reverse border-r border-zinc-700"
+          className="w-14 shrink-0 flex flex-col-reverse border-r border-zinc-700 overflow-hidden"
           style={{ height: pitchRange * ROW_HEIGHT }}
         >
           {Array.from({ length: pitchRange }, (_, i) => {
@@ -117,8 +129,9 @@ export default function PianoRoll({ notes, currentTime, totalDuration, isPlaying
         {/* Scrollable roll area */}
         <div
           ref={containerRef}
-          className="flex-1 overflow-x-auto overflow-y-hidden relative"
+          className="flex-1 overflow-x-auto overflow-y-hidden relative cursor-crosshair"
           style={{ height: pitchRange * ROW_HEIGHT }}
+          onClick={handleClick}
         >
           <div
             className="relative"
@@ -140,6 +153,52 @@ export default function PianoRoll({ notes, currentTime, totalDuration, isPlaying
                 />
               );
             })}
+
+            {/* Bar lines and section labels */}
+            {bars?.map((bar) => {
+              const x = bar.startTime / MS_PER_PX;
+              return (
+                <div key={`bar-${bar.index}`}>
+                  <div
+                    className="absolute top-0 bottom-0 w-[1px] bg-zinc-700/40 pointer-events-none"
+                    style={{ left: x }}
+                  />
+                  {/* Bar number */}
+                  <div
+                    className="absolute text-[8px] text-zinc-600 pointer-events-none"
+                    style={{ left: x + 2, top: 0 }}
+                  >
+                    {bar.index + 1}
+                  </div>
+                  {/* Section label */}
+                  {bar.section && (
+                    <div
+                      className="absolute text-[9px] text-amber-500 font-bold pointer-events-none bg-zinc-950/80 px-1 rounded"
+                      style={{ left: x + 2, top: 12 }}
+                    >
+                      {bar.section}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {/* Loop region highlight */}
+            {loopA != null && loopB != null && (
+              <div
+                className="absolute top-0 bottom-0 bg-purple-500/10 border-l-2 border-r-2 border-purple-400/40 pointer-events-none"
+                style={{
+                  left: loopA / MS_PER_PX,
+                  width: (loopB - loopA) / MS_PER_PX,
+                }}
+              />
+            )}
+            {loopA != null && loopB == null && (
+              <div
+                className="absolute top-0 bottom-0 w-[2px] bg-purple-400 pointer-events-none"
+                style={{ left: loopA / MS_PER_PX }}
+              />
+            )}
 
             {/* Note bars */}
             {notes.map((note) => {

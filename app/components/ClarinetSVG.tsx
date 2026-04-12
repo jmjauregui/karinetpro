@@ -45,14 +45,6 @@ export default function ClarinetSVG({ activeKeys, noteName }: ClarinetSVGProps) 
 
   return (
     <div className="flex flex-col items-center">
-      {/* Note display */}
-      <div className="mb-2 h-10 flex items-center justify-center">
-        {noteName && (
-          <span className="text-2xl font-bold text-amber-400 tracking-wider">
-            {noteName}
-          </span>
-        )}
-      </div>
 
       <svg
         viewBox="0 0 110 600"

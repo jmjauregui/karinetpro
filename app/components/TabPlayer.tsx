@@ -5,11 +5,25 @@ import ClarinetSVG from "./ClarinetSVG";
 import PianoRoll, { RollNote } from "./PianoRoll";
 import { KeyId, FINGERINGS, midiToClarinetWrittenNote } from "../lib/clarinet-fingerings";
 import { useClarinetAudio } from "../lib/use-clarinet-audio";
+import {
+  isTabFavorite,
+  toggleFavoriteTab,
+  type FavoriteTab,
+} from "../lib/favorites";
+
+export interface TabSourceInfo {
+  artistSlug: string;
+  artistName: string;
+  songSlug: string;
+  songName: string;
+}
 
 interface TabPlayerProps {
   fileData: ArrayBuffer;
   fileName: string;
+  sourceInfo?: TabSourceInfo;
   onClose: () => void;
+  onFavoritesChanged?: () => void;
 }
 
 interface TrackInfo {
@@ -104,7 +118,7 @@ function parseSongFromBuffer(buffer: ArrayBuffer, fileName: string): Promise<Par
   });
 }
 
-export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProps) {
+export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onFavoritesChanged }: TabPlayerProps) {
   const [song, setSong] = useState<ParsedSong | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -113,6 +127,9 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
   const [currentTime, setCurrentTime] = useState(0);
   const [tempo, setTempo] = useState(100);
   const [muted, setMuted] = useState(false);
+  const [isFav, setIsFav] = useState(
+    sourceInfo ? isTabFavorite(sourceInfo.artistSlug, sourceInfo.songSlug) : false,
+  );
 
   const animRef = useRef<number>(0);
   const lastFrameRef = useRef<number>(0);
@@ -318,6 +335,43 @@ export default function TabPlayer({ fileData, fileName, onClose }: TabPlayerProp
           </div>
 
           <span>BPM: {song.tempo}</span>
+
+          {/* Favorite button */}
+          {sourceInfo && (
+            <button
+              onClick={() => {
+                const added = toggleFavoriteTab({
+                  artistSlug: sourceInfo.artistSlug,
+                  artistName: sourceInfo.artistName,
+                  songSlug: sourceInfo.songSlug,
+                  songName: sourceInfo.songName,
+                });
+                setIsFav(added);
+                onFavoritesChanged?.();
+              }}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-colors ${
+                isFav
+                  ? "bg-pink-500/20 text-pink-400 hover:bg-pink-500/30"
+                  : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-pink-400"
+              }`}
+              title={isFav ? "Quitar de favoritos" : "Agregar a favoritos"}
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill={isFav ? "currentColor" : "none"}
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+              </svg>
+              {isFav ? "Favorito" : "Agregar a favoritos"}
+            </button>
+          )}
+
           {!audio.ready && (
             <span className="text-amber-500 text-xs animate-pulse">
               Cargando sonidos...

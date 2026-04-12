@@ -1,24 +1,37 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import TabPlayer from "./components/TabPlayer";
+import TabPlayer, { TabSourceInfo } from "./components/TabPlayer";
 import FileUploader from "./components/FileUploader";
 import TabBrowser from "./components/TabBrowser";
 
 interface LoadedFile {
   data: ArrayBuffer;
   name: string;
+  sourceInfo?: TabSourceInfo;
 }
 
 export default function Home() {
   const [file, setFile] = useState<LoadedFile | null>(null);
+  const [favVersion, setFavVersion] = useState(0);
 
-  const handleFileLoaded = useCallback((data: ArrayBuffer, name: string) => {
+  const handleFileLoadedFromBrowser = useCallback(
+    (data: ArrayBuffer, name: string, sourceInfo: TabSourceInfo) => {
+      setFile({ data, name, sourceInfo });
+    },
+    [],
+  );
+
+  const handleFileLoadedLocal = useCallback((data: ArrayBuffer, name: string) => {
     setFile({ data, name });
   }, []);
 
   const handleClose = useCallback(() => {
     setFile(null);
+  }, []);
+
+  const handleFavoritesChanged = useCallback(() => {
+    setFavVersion((v) => v + 1);
   }, []);
 
   return (
@@ -45,18 +58,23 @@ export default function Home() {
           <TabPlayer
             fileData={file.data}
             fileName={file.name}
+            sourceInfo={file.sourceInfo}
             onClose={handleClose}
+            onFavoritesChanged={handleFavoritesChanged}
           />
         ) : (
           <div className="flex flex-1 min-h-0">
             {/* Left: Browser (70%) */}
             <div className="flex-[7] min-h-0 flex flex-col border-r border-zinc-800">
-              <TabBrowser onTabLoaded={handleFileLoaded} />
+              <TabBrowser
+                onTabLoaded={handleFileLoadedFromBrowser}
+                favVersion={favVersion}
+              />
             </div>
 
             {/* Right: Upload (30%) */}
             <div className="flex-[3] min-h-0 flex flex-col">
-              <FileUploader onFileLoaded={handleFileLoaded} />
+              <FileUploader onFileLoaded={handleFileLoadedLocal} />
             </div>
           </div>
         )}

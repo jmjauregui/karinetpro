@@ -1,9 +1,17 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
+import {
+  getFavoriteArtists,
+  getFavoriteTabsForArtist,
+  type FavoriteArtist,
+  type FavoriteTab,
+} from "../lib/favorites";
+import type { TabSourceInfo } from "./TabPlayer";
 
 interface TabBrowserProps {
-  onTabLoaded: (data: ArrayBuffer, fileName: string) => void;
+  onTabLoaded: (data: ArrayBuffer, fileName: string, sourceInfo: TabSourceInfo) => void;
+  favVersion: number; // bumped externally to force re-read of favorites
 }
 
 interface Artist {
@@ -19,7 +27,25 @@ interface Song {
 
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz0".split("");
 
-export default function TabBrowser({ onTabLoaded }: TabBrowserProps) {
+// Heart icon used in multiple places
+function HeartIcon({ filled, size = 14 }: { filled: boolean; size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill={filled ? "currentColor" : "none"}
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+    </svg>
+  );
+}
+
+export default function TabBrowser({ onTabLoaded, favVersion }: TabBrowserProps) {
   const [step, setStep] = useState<"letters" | "artists" | "songs">("letters");
   const [selectedLetter, setSelectedLetter] = useState("");
   const [selectedArtist, setSelectedArtist] = useState<Artist | null>(null);
@@ -29,6 +55,22 @@ export default function TabBrowser({ onTabLoaded }: TabBrowserProps) {
   const [error, setError] = useState<string | null>(null);
   const [searchFilter, setSearchFilter] = useState("");
   const [downloading, setDownloading] = useState<string | null>(null);
+
+  // Read favorites from localStorage (re-read when favVersion changes)
+  const [favArtists, setFavArtists] = useState<FavoriteArtist[]>([]);
+  const [favTabsForArtist, setFavTabsForArtist] = useState<FavoriteTab[]>([]);
+
+  useEffect(() => {
+    setFavArtists(getFavoriteArtists());
+  }, [favVersion]);
+
+  useEffect(() => {
+    if (selectedArtist) {
+      setFavTabsForArtist(getFavoriteTabsForArtist(selectedArtist.slug));
+    } else {
+      setFavTabsForArtist([]);
+    }
+  }, [selectedArtist, favVersion]);
 
   const loadArtists = useCallback(async (letter: string) => {
     setLoading(true);
@@ -68,6 +110,10 @@ export default function TabBrowser({ onTabLoaded }: TabBrowserProps) {
     }
   }, []);
 
+  const loadSongsFromFav = useCallback((fav: FavoriteArtist) => {
+    loadSongs({ name: fav.name, slug: fav.slug, image: fav.image });
+  }, [loadSongs]);
+
   const downloadAndPlay = useCallback(
     async (song: Song) => {
       if (!selectedArtist) return;
@@ -86,7 +132,6 @@ export default function TabBrowser({ onTabLoaded }: TabBrowserProps) {
 
         const buffer = await res.arrayBuffer();
 
-        // Extract filename from content-disposition or build one
         const disposition = res.headers.get("content-disposition");
         let fileName = `${selectedArtist.slug}-${song.slug}.gp`;
         if (disposition) {
@@ -94,7 +139,12 @@ export default function TabBrowser({ onTabLoaded }: TabBrowserProps) {
           if (match?.[1]) fileName = match[1];
         }
 
-        onTabLoaded(buffer, fileName);
+        onTabLoaded(buffer, fileName, {
+          artistSlug: selectedArtist.slug,
+          artistName: selectedArtist.name,
+          songSlug: song.slug,
+          songName: song.name,
+        });
       } catch (err) {
         setError((err as Error).message);
       } finally {
@@ -127,6 +177,11 @@ export default function TabBrowser({ onTabLoaded }: TabBrowserProps) {
         s.name.toLowerCase().includes(searchFilter.toLowerCase()),
       )
     : songs;
+
+  // Split songs into favorites-first and rest
+  const favSongSlugs = new Set(favTabsForArtist.map((f) => f.songSlug));
+  const favSongs = filteredSongs.filter((s) => favSongSlugs.has(s.slug));
+  const otherSongs = filteredSongs.filter((s) => !favSongSlugs.has(s.slug));
 
   return (
     <div className="flex flex-col h-full">
@@ -198,7 +253,7 @@ export default function TabBrowser({ onTabLoaded }: TabBrowserProps) {
           </div>
         )}
 
-        {/* Letter grid */}
+        {/* ── Letters view ── */}
         {step === "letters" && !loading && (
           <div>
             <p className="text-zinc-500 text-sm mb-4">Selecciona una letra para explorar artistas</p>
@@ -213,10 +268,47 @@ export default function TabBrowser({ onTabLoaded }: TabBrowserProps) {
                 </button>
               ))}
             </div>
+
+            {/* ── Favorites section ── */}
+            {favArtists.length > 0 && (
+              <div className="mt-6">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="text-pink-400"><HeartIcon filled size={16} /></span>
+                  <h3 className="text-sm font-medium text-zinc-300">Favoritos</h3>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                  {favArtists.map((fav) => (
+                    <button
+                      key={fav.slug}
+                      onClick={() => loadSongsFromFav(fav)}
+                      className="flex items-center gap-3 p-3 rounded-lg bg-pink-500/5 border border-pink-500/20 hover:bg-pink-500/10 hover:border-pink-500/30 transition-all text-left group"
+                    >
+                      <div className="w-10 h-10 rounded-full bg-zinc-700 flex items-center justify-center text-pink-400 text-sm font-bold shrink-0">
+                        {fav.name[0]?.toUpperCase()}
+                      </div>
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-zinc-200 group-hover:text-pink-400 transition-colors truncate text-sm">
+                          {fav.name}
+                        </span>
+                        {/* Show count of favorite tabs for this artist */}
+                        {(() => {
+                          const count = getFavoriteTabsForArtist(fav.slug).length;
+                          return count > 0 ? (
+                            <span className="text-[11px] text-zinc-600">
+                              {count} tab{count > 1 ? "s" : ""} favorita{count > 1 ? "s" : ""}
+                            </span>
+                          ) : null;
+                        })()}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
-        {/* Artist list */}
+        {/* ── Artist list ── */}
         {step === "artists" && !loading && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
             {filteredArtists.length === 0 && (
@@ -248,58 +340,116 @@ export default function TabBrowser({ onTabLoaded }: TabBrowserProps) {
           </div>
         )}
 
-        {/* Song list */}
+        {/* ── Song list ── */}
         {step === "songs" && !loading && (
           <div className="flex flex-col gap-1">
             {filteredSongs.length === 0 && (
               <p className="text-zinc-600 text-sm">No se encontraron canciones</p>
             )}
-            {filteredSongs.map((song) => (
-              <button
-                key={song.slug}
-                onClick={() => downloadAndPlay(song)}
-                disabled={downloading !== null}
-                className="flex items-center justify-between p-3 rounded-lg bg-zinc-800/40 border border-zinc-800 hover:bg-zinc-800 hover:border-zinc-700 transition-all text-left group disabled:opacity-50"
-              >
-                <div className="flex items-center gap-3">
-                  <svg
-                    width="16"
-                    height="16"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    className="text-zinc-600 group-hover:text-amber-400 transition-colors shrink-0"
-                  >
-                    <path d="M9 18V5l12-2v13" />
-                    <circle cx="6" cy="18" r="3" />
-                    <circle cx="18" cy="16" r="3" />
-                  </svg>
-                  <span className="text-zinc-300 group-hover:text-amber-400 transition-colors">
-                    {song.name}
-                  </span>
-                </div>
 
-                {downloading === song.slug ? (
-                  <div className="w-4 h-4 border-2 border-amber-400 border-t-transparent rounded-full animate-spin shrink-0" />
-                ) : (
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    className="text-zinc-700 group-hover:text-amber-400 transition-colors shrink-0"
-                  >
-                    <polygon points="5 3 19 12 5 21 5 3" />
-                  </svg>
+            {/* Favorite tabs first */}
+            {favSongs.length > 0 && (
+              <>
+                <div className="flex items-center gap-2 mb-1 mt-1">
+                  <span className="text-pink-400"><HeartIcon filled size={12} /></span>
+                  <span className="text-xs text-pink-400/80 font-medium">Favoritas</span>
+                </div>
+                {favSongs.map((song) => (
+                  <SongRow
+                    key={song.slug}
+                    song={song}
+                    isFav
+                    downloading={downloading}
+                    onPlay={() => downloadAndPlay(song)}
+                  />
+                ))}
+
+                {otherSongs.length > 0 && (
+                  <div className="border-t border-zinc-800 my-2" />
                 )}
-              </button>
+              </>
+            )}
+
+            {/* Rest of songs */}
+            {otherSongs.map((song) => (
+              <SongRow
+                key={song.slug}
+                song={song}
+                isFav={false}
+                downloading={downloading}
+                onPlay={() => downloadAndPlay(song)}
+              />
             ))}
           </div>
         )}
       </div>
     </div>
+  );
+}
+
+function SongRow({
+  song,
+  isFav,
+  downloading,
+  onPlay,
+}: {
+  song: Song;
+  isFav: boolean;
+  downloading: string | null;
+  onPlay: () => void;
+}) {
+  return (
+    <button
+      onClick={onPlay}
+      disabled={downloading !== null}
+      className={`flex items-center justify-between p-3 rounded-lg border transition-all text-left group disabled:opacity-50 ${
+        isFav
+          ? "bg-pink-500/5 border-pink-500/20 hover:bg-pink-500/10 hover:border-pink-500/30"
+          : "bg-zinc-800/40 border-zinc-800 hover:bg-zinc-800 hover:border-zinc-700"
+      }`}
+    >
+      <div className="flex items-center gap-3">
+        {isFav ? (
+          <span className="text-pink-400 shrink-0"><HeartIcon filled size={14} /></span>
+        ) : (
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            className="text-zinc-600 group-hover:text-amber-400 transition-colors shrink-0"
+          >
+            <path d="M9 18V5l12-2v13" />
+            <circle cx="6" cy="18" r="3" />
+            <circle cx="18" cy="16" r="3" />
+          </svg>
+        )}
+        <span className={`transition-colors ${
+          isFav
+            ? "text-zinc-200 group-hover:text-pink-400"
+            : "text-zinc-300 group-hover:text-amber-400"
+        }`}>
+          {song.name}
+        </span>
+      </div>
+
+      {downloading === song.slug ? (
+        <div className="w-4 h-4 border-2 border-amber-400 border-t-transparent rounded-full animate-spin shrink-0" />
+      ) : (
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          className="text-zinc-700 group-hover:text-amber-400 transition-colors shrink-0"
+        >
+          <polygon points="5 3 19 12 5 21 5 3" />
+        </svg>
+      )}
+    </button>
   );
 }

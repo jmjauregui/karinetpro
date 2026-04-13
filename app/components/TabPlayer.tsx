@@ -2,9 +2,16 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ClarinetSVG from "./ClarinetSVG";
+import GuitarStringVisualizer from "./GuitarStringVisualizer";
 import PianoRoll, { RollNote } from "./PianoRoll";
 import { KeyId, FINGERINGS, midiToClarinetWrittenNote } from "../lib/clarinet-fingerings";
 import { useMultiAudio, type TrackAudioState } from "../lib/use-multi-audio";
+import { useElectricGuitarAudio, type GuitarTone } from "../lib/use-electric-guitar-audio";
+import {
+  getBestPositionForMidiNote,
+  midiToNoteName,
+  isPlayableOnGuitar,
+} from "../lib/electric-guitar-utils";
 import { addRecentFile } from "../lib/recent-files";
 import {
   isTabFavorite,
@@ -148,6 +155,8 @@ function parseSongFromBuffer(buffer: ArrayBuffer, fileName: string): Promise<Par
   });
 }
 
+export type InstrumentType = "clarinet" | "electric-guitar";
+
 export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onFavoritesChanged }: TabPlayerProps) {
   const [song, setSong] = useState<ParsedSong | null>(null);
   const [loading, setLoading] = useState(true);
@@ -156,6 +165,7 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [tempo, setTempo] = useState(100);
+  const [instrument, setInstrument] = useState<InstrumentType>("clarinet");
   const [isFav, setIsFav] = useState(
     sourceInfo ? isTabFavorite(sourceInfo.artistSlug, sourceInfo.songSlug) : false,
   );
@@ -191,6 +201,9 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
   );
 
   const audio = useMultiAudio(trackDefs);
+
+  // Electric guitar audio (only used when instrument is "electric-guitar")
+  const guitarAudio = useElectricGuitarAudio("clean");
 
   const track = useMemo(() => song?.tracks[selectedTrack] ?? null, [song, selectedTrack]);
 
@@ -243,9 +256,10 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
     setCurrentTime(0);
     lastFrameRef.current = 0;
     audio.stopAll();
+    guitarAudio.stopAll();
     triggeredNotesRef.current.clear();
     setSelectedTrack(idx);
-  }, [audio]);
+  }, [audio, guitarAudio]);
 
   // Determine which tracks should actually play sound
   const shouldTrackPlay = useCallback(
@@ -323,7 +337,17 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
               if (!triggeredNotesRef.current.has(key)) {
                 triggeredNotesRef.current.add(key);
                 const durationSec = (note.duration / 1000) * (100 / tempo);
-                audio.playNote(ti, note.midiPitch + (ti === selectedTrack ? transpose : 0), durationSec * vol);
+                const pitch = note.midiPitch + (ti === selectedTrack ? transpose : 0);
+
+                if (instrument === "electric-guitar") {
+                  // Use electric guitar audio
+                  if (guitarAudio.ready && isPlayableOnGuitar(pitch)) {
+                    guitarAudio.playNote(pitch, durationSec * vol, guitarAudio.tone);
+                  }
+                } else {
+                  // Use multi-track audio (clarinet, etc.)
+                  audio.playNote(ti, pitch, durationSec * vol);
+                }
               }
             }
           }
@@ -349,7 +373,7 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
       setCurrentTime(next);
       animRef.current = requestAnimationFrame(tick);
     },
-    [song, track, tempo, audio, shouldTrackPlay, selectedTrack, transpose, loopA, loopB, maxDuration, metronomeOn, playMetronomeClick],
+    [song, track, tempo, audio, guitarAudio, shouldTrackPlay, selectedTrack, transpose, loopA, loopB, maxDuration, metronomeOn, playMetronomeClick, instrument],
   );
 
   useEffect(() => {
@@ -392,6 +416,7 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
     setIsPlaying((p) => {
       if (p) {
         audio.stopAll();
+        guitarAudio.stopAll();
       } else {
         triggeredNotesRef.current.clear();
         metronomeBarRef.current = -1;
@@ -399,7 +424,7 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
       }
       return !p;
     });
-  }, [song, audio]);
+  }, [song, audio, guitarAudio]);
 
   const handleStop = useCallback(() => {
     setIsPlaying(false);
@@ -407,10 +432,11 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
     setCurrentTime(0);
     lastFrameRef.current = 0;
     audio.stopAll();
+    guitarAudio.stopAll();
     triggeredNotesRef.current.clear();
     metronomeBarRef.current = -1;
     metronomeBeatRef.current = -1;
-  }, [audio]);
+  }, [audio, guitarAudio]);
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = Number(e.target.value);
@@ -425,8 +451,9 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
     currentTimeRef.current = clamped;
     setCurrentTime(clamped);
     audio.stopAll();
+    guitarAudio.stopAll();
     triggeredNotesRef.current.clear();
-  }, [maxDuration, audio]);
+  }, [maxDuration, audio, guitarAudio]);
 
   const seekBy = useCallback((deltaMs: number) => {
     seekTo(currentTimeRef.current + deltaMs);
@@ -450,6 +477,9 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
       setLoopA(null);
       setLoopB(null);
     }
+    // Reset metronome and stop audio on loop change
+    metronomeBarRef.current = -1;
+    metronomeBeatRef.current = -1;
   }, [loopA, loopB]);
 
   // Keyboard shortcuts
@@ -584,9 +614,15 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
             </button>
           )}
 
-          {!audio.ready && (
+          {!audio.ready && instrument === "clarinet" && (
             <span className="text-amber-500 text-xs animate-pulse">
               Cargando ({audio.loadingInstruments}/{audio.totalInstruments})...
+            </span>
+          )}
+
+          {!guitarAudio.ready && instrument === "electric-guitar" && (
+            <span className="text-amber-500 text-xs animate-pulse">
+              Cargando guitarra...
             </span>
           )}
 
@@ -621,8 +657,20 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
 
       {/* Main area */}
       <div className="flex flex-1 min-h-0">
-        {/* Clarinet + current note display */}
-        <div className="w-40 shrink-0 flex flex-col items-center py-4 border-r border-zinc-800 bg-zinc-950/60 overflow-y-auto">
+        {/* Instrument display (Clarinet or Electric Guitar) */}
+        <div className="w-48 shrink-0 flex flex-col items-center py-4 border-r border-zinc-800 bg-zinc-950/60 overflow-y-auto">
+          {/* Instrument selector */}
+          <div className="mb-3 flex flex-col items-center gap-2">
+            <select
+              value={instrument}
+              onChange={(e) => setInstrument(e.target.value as InstrumentType)}
+              className="bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-amber-500 cursor-pointer"
+            >
+              <option value="clarinet">Clarinete</option>
+              <option value="electric-guitar">Guitarra Eléctrica</option>
+            </select>
+          </div>
+
           {/* Large note name */}
           <div className="mb-2 text-center">
             <div className="text-3xl font-bold text-amber-400 min-h-[40px]">
@@ -634,7 +682,16 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
               </div>
             )}
           </div>
-          <ClarinetSVG activeKeys={activeKeys} noteName={displayNote} />
+
+          {/* Dynamic instrument visualization */}
+          {instrument === "clarinet" ? (
+            <ClarinetSVG activeKeys={activeKeys} noteName={displayNote} />
+          ) : (
+            <GuitarStringVisualizer
+              midiNote={activeNotes.length > 0 ? activeNotes[0].midiPitch : null}
+              noteName={displayNote}
+            />
+          )}
         </div>
 
         {/* Piano Roll + Mixer */}
@@ -838,6 +895,43 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
             +
           </button>
         </div>
+
+        {/* Guitar tone selector (only for electric guitar) */}
+        {instrument === "electric-guitar" && (
+          <div className="flex items-center gap-1.5 ml-2 pl-2 border-l border-zinc-700">
+            <span className="text-[10px] text-zinc-500">Tono:</span>
+            <button
+              onClick={() => guitarAudio.setTone("clean")}
+              className={`px-2 py-1 rounded text-[10px] font-bold transition-colors ${
+                guitarAudio.tone === "clean"
+                  ? "bg-green-500/30 text-green-400"
+                  : "bg-zinc-800 text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              Clean
+            </button>
+            <button
+              onClick={() => guitarAudio.setTone("overdrive")}
+              className={`px-2 py-1 rounded text-[10px] font-bold transition-colors ${
+                guitarAudio.tone === "overdrive"
+                  ? "bg-amber-500/30 text-amber-400"
+                  : "bg-zinc-800 text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              OD
+            </button>
+            <button
+              onClick={() => guitarAudio.setTone("distortion")}
+              className={`px-2 py-1 rounded text-[10px] font-bold transition-colors ${
+                guitarAudio.tone === "distortion"
+                  ? "bg-red-500/30 text-red-400"
+                  : "bg-zinc-800 text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              Dist
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Keyboard shortcuts help */}

@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git checkout *)"
+      "Bash(git checkout *)",
+      "Bash(pnpm run *)",
+      "Bash(timeout *)",
+      "Bash(taskkill *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(start *)"
     ]
-  }
+  },
+  "$version": 3
 }

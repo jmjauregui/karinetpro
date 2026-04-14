@@ -9,8 +9,10 @@ import { useMultiAudio, type TrackAudioState } from "../lib/use-multi-audio";
 import { useElectricGuitarAudio, type GuitarTone } from "../lib/use-electric-guitar-audio";
 import {
   getBestPositionForMidiNote,
+  getPositionsForMidiNote,
   midiToNoteName,
   isPlayableOnGuitar,
+  STANDARD_TUNING,
 } from "../lib/electric-guitar-utils";
 import { addRecentFile } from "../lib/recent-files";
 import {
@@ -110,6 +112,8 @@ function parseSongFromBuffer(buffer: ArrayBuffer, fileName: string): Promise<Par
                 startTime: timeMs,
                 duration: durationMs,
                 barIndex: bar.index,
+                guitarString: note.string + 1, // GP uses 0-5, convert to 1-6
+                guitarFret: note.fret,
               });
             }
           }
@@ -657,7 +661,7 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
 
       {/* Main area */}
       <div className="flex flex-1 min-h-0">
-        {/* Instrument display (Clarinet or Electric Guitar) */}
+        {/* Left sidebar: instrument selector + note display */}
         <div className="w-48 shrink-0 flex flex-col items-center py-4 border-r border-zinc-800 bg-zinc-950/60 overflow-y-auto">
           {/* Instrument selector */}
           <div className="mb-3 flex flex-col items-center gap-2">
@@ -683,36 +687,50 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
             )}
           </div>
 
-          {/* Dynamic instrument visualization */}
-          {instrument === "clarinet" ? (
+          {/* Clarinet SVG (only when clarinet is selected) */}
+          {instrument === "clarinet" && (
             <ClarinetSVG activeKeys={activeKeys} noteName={displayNote} />
-          ) : (
-            <GuitarStringVisualizer
-              midiNote={activeNotes.length > 0 ? activeNotes[0].midiPitch : null}
-              noteName={displayNote}
-            />
           )}
         </div>
 
-        {/* Piano Roll + Mixer */}
+        {/* Right area: Guitar Tab or Piano Roll */}
         <div className="flex-1 overflow-hidden bg-zinc-950 flex flex-col">
-          <div className="flex-1 overflow-hidden border-b border-zinc-800">
-            <PianoRoll
-              notes={displayNotes}
-              currentTime={currentTime}
-              totalDuration={track.totalDuration}
-              isPlaying={isPlaying}
-              loopA={loopA}
-              loopB={loopB}
-              bars={track.bars}
-              onSeek={seekTo}
-            />
-          </div>
-        </div>
+          {instrument === "electric-guitar" ? (
+            /* Guitar Tablature - full width */
+            <div className="flex-1 p-2">
+              <GuitarStringVisualizer
+                notes={displayNotes.map((n) => ({
+                  stringNumber: n.guitarString ?? 1,
+                  fret: n.guitarFret ?? 0,
+                  time: n.startTime,
+                  duration: n.duration,
+                  midiPitch: n.midiPitch,
+                }))}
+                bars={track.bars}
+                currentTime={currentTime}
+                totalDuration={track.totalDuration}
+                isPlaying={isPlaying}
+              />
+            </div>
+          ) : (
+            /* Piano Roll (clarinet mode) */
+            <div className="flex-1 overflow-hidden border-b border-zinc-800">
+              <PianoRoll
+                notes={displayNotes}
+                currentTime={currentTime}
+                totalDuration={track.totalDuration}
+                isPlaying={isPlaying}
+                loopA={loopA}
+                loopB={loopB}
+                bars={track.bars}
+                onSeek={seekTo}
+              />
+            </div>
+          )}
 
-        {/* Mixer panel */}
-        {showMixer && (
-          <div className="w-56 shrink-0 border-l border-zinc-800 bg-zinc-900/80 overflow-y-auto">
+          {/* Mixer panel */}
+          {showMixer && (
+            <div className="w-56 shrink-0 border-l border-zinc-800 bg-zinc-900/80 overflow-y-auto self-end">
             <div className="px-3 py-2 border-b border-zinc-800">
               <span className="text-xs font-semibold text-zinc-300">Mezclador</span>
             </div>
@@ -760,6 +778,7 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
             })}
           </div>
         )}
+        </div>
       </div>
 
       {/* Bottom: Transport controls */}
@@ -867,13 +886,14 @@ export default function TabPlayer({ fileData, fileName, sourceInfo, onClose, onF
           <span className="text-[10px] text-zinc-500">Tempo:</span>
           <input
             type="range"
-            min={25}
-            max={200}
+            min={10}
+            max={1000}
+            step={5}
             value={tempo}
             onChange={(e) => setTempo(Number(e.target.value))}
-            className="w-20 h-1 accent-amber-400 cursor-pointer"
+            className="w-28 h-1 accent-amber-400 cursor-pointer"
           />
-          <span className="text-[10px] text-zinc-400 w-8 font-mono">{tempo}%</span>
+          <span className="text-[10px] text-zinc-400 w-10 font-mono">{tempo}%</span>
         </div>
 
         {/* Transposition */}

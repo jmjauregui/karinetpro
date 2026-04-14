@@ -9,6 +9,9 @@ export interface RollNote {
   startTime: number; // ms from beginning
   duration: number;  // ms
   barIndex: number;
+  // Guitar-specific data from Guitar Pro files
+  guitarString?: number; // 1-6 (from GP file)
+  guitarFret?: number; // fret number (from GP file)
 }
 
 interface BarInfo {

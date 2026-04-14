@@ -1,184 +1,321 @@
 "use client";
 
-import { useMemo } from "react";
-import {
-  STANDARD_TUNING,
-  getPositionsForMidiNote,
-  midiToNoteName,
-  DEFAULT_FRET_COUNT,
-} from "../lib/electric-guitar-utils";
+import { useMemo, useRef, useEffect, useState } from "react";
+import { STANDARD_TUNING } from "../lib/electric-guitar-utils";
 
-interface GuitarStringVisualizerProps {
-  midiNote: number | null;
-  noteName?: string;
-  activeStrings?: number[]; // String numbers that are currently active
-  showFretboard?: boolean;
-}
-
-interface FretMarker {
+interface TabNote {
+  stringNumber: number;
   fret: number;
-  isSingle: boolean;
-  isDouble: boolean;
+  time: number;
+  duration: number;
+  midiPitch: number;
 }
 
-// Standard fret markers (dots at frets 3, 5, 7, 9, 12, 15, 17, 19, 21, 24)
-const FRET_MARKERS: FretMarker[] = [];
-for (let i = 1; i <= DEFAULT_FRET_COUNT; i++) {
-  FRET_MARKERS.push({
-    fret: i,
-    isSingle: [3, 5, 7, 9, 15, 17, 19, 21].includes(i),
-    isDouble: i === 12 || i === 24,
+interface TabBar {
+  startTime: number;
+  endTime: number;
+  section?: string;
+  timeSignature: { numerator: number; denominator: number };
+}
+
+interface GuitarTabVisualizerProps {
+  notes: TabNote[];
+  bars: TabBar[];
+  currentTime: number;
+  totalDuration: number;
+  isPlaying?: boolean;
+}
+
+const TAB_STRINGS = [6, 5, 4, 3, 2, 1]; // e, B, G, D, A, E
+const STRING_HEIGHT = 24; // px per string
+const BAR_WIDTH = 200; // px per bar
+const LEFT_MARGIN = 60;
+
+function formatTime(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${sec.toString().padStart(2, "0")}`;
+}
+
+export default function GuitarTabVisualizer({
+  notes,
+  bars,
+  currentTime,
+  totalDuration,
+  isPlaying = false,
+}: GuitarTabVisualizerProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const playheadRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const [darkMode, setDarkMode] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('guitar-tab-dark-mode') === 'true';
+    }
+    return false;
   });
-}
 
-export default function GuitarStringVisualizer({
-  midiNote,
-  noteName,
-  activeStrings = [],
-  showFretboard = true,
-}: GuitarStringVisualizerProps) {
-  // Calculate active positions for the current note
-  const activePositions = useMemo(() => {
-    if (midiNote === null) return [];
-    return getPositionsForMidiNote(midiNote);
-  }, [midiNote]);
+  // Persist darkMode preference
+  useEffect(() => {
+    localStorage.setItem('guitar-tab-dark-mode', String(darkMode));
+  }, [darkMode]);
 
-  // String thickness (lower strings are thicker)
-  const stringThickness = [4, 3.5, 3, 2.5, 2, 1.5];
+  // Total width of the tablature
+  const totalWidth = bars.length * BAR_WIDTH + LEFT_MARGIN + 100;
+
+  // Find current bar
+  const currentBarIndex = useMemo(() => {
+    return bars.findIndex((b) => currentTime >= b.startTime && currentTime < b.endTime);
+  }, [bars, currentTime]);
+
+  // Get notes for a specific bar
+  const getNotesForBar = (bar: TabBar) => {
+    return notes.filter((n) => n.time >= bar.startTime && n.time < bar.endTime);
+  };
+
+  // Auto-scroll to keep playhead visible
+  useEffect(() => {
+    if (isPlaying && containerRef.current) {
+      const container = containerRef.current;
+      const playheadX = currentBarIndex * BAR_WIDTH + LEFT_MARGIN;
+      const containerRect = container.getBoundingClientRect();
+      const targetScroll = playheadX - containerRect.width * 0.3;
+      container.scrollLeft = Math.max(0, targetScroll);
+    }
+  }, [currentTime, isPlaying, currentBarIndex, containerWidth]);
+
+  // Track container width
+  useEffect(() => {
+    const updateWidth = () => {
+      if (containerRef.current) {
+        setContainerWidth(containerRef.current.clientWidth);
+      }
+    };
+    updateWidth();
+    window.addEventListener("resize", updateWidth);
+    return () => window.removeEventListener("resize", updateWidth);
+  }, []);
 
   return (
-    <div className="flex flex-col items-center w-full h-full p-2">
-      {/* Guitar neck/fretboard */}
-      {showFretboard && (
-        <div className="w-full mb-2">
-          {/* Fret numbers */}
-          <div className="flex items-center mb-1 pl-8">
-            {Array.from({ length: DEFAULT_FRET_COUNT }, (_, i) => i + 1).map((fret) => {
-              const marker = FRET_MARKERS.find((m) => m.fret === fret);
-              return (
+    <div className={`flex flex-col w-full h-full rounded-lg overflow-hidden border ${darkMode ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-zinc-300'}`}>
+      {/* Header */}
+      <div className={`flex items-center justify-between px-3 py-1.5 border-b ${darkMode ? 'bg-zinc-800 border-zinc-700' : 'bg-zinc-100 border-zinc-300'}`}>
+        <div className="flex items-center gap-3">
+          {bars[currentBarIndex] && (
+            <>
+              {bars[currentBarIndex].section && (
+                <span className={`text-[10px] font-bold ${darkMode ? 'text-amber-400' : 'text-amber-600'}`}>
+                  {bars[currentBarIndex].section}
+                </span>
+              )}
+              <span className={`text-[10px] ${darkMode ? 'text-zinc-400' : 'text-zinc-500'}`}>
+                Compás {currentBarIndex + 1}
+                {bars[currentBarIndex]?.timeSignature && (
+                  <span className="ml-1">
+                    {bars[currentBarIndex].timeSignature.numerator}/
+                    {bars[currentBarIndex].timeSignature.denominator}
+                  </span>
+                )}
+              </span>
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={`text-[10px] font-mono ${darkMode ? 'text-zinc-300' : 'text-zinc-600'}`}>
+            {formatTime(currentTime)}
+          </span>
+          {/* Theme toggle */}
+          <button
+            onClick={() => setDarkMode((d) => !d)}
+            className={`w-6 h-6 rounded flex items-center justify-center text-xs transition-colors ${
+              darkMode
+                ? 'bg-zinc-700 text-yellow-400 hover:bg-zinc-600'
+                : 'bg-zinc-200 text-zinc-600 hover:bg-zinc-300'
+            }`}
+            title={darkMode ? 'Cambiar a fondo blanco' : 'Cambiar a fondo negro'}
+          >
+            {darkMode ? '☀' : '☾'}
+          </button>
+        </div>
+      </div>
+
+      {/* Tablature scroll area */}
+      <div
+        ref={containerRef}
+        className={`flex-1 overflow-x-auto overflow-y-hidden relative ${darkMode ? 'bg-zinc-900' : 'bg-white'}`}
+        style={{ scrollBehavior: isPlaying ? "auto" : "smooth" }}
+      >
+        <div
+          className="relative"
+          style={{ width: totalWidth, minWidth: "100%", height: "100%" }}
+        >
+          {/* TAB label */}
+          <div
+            className="absolute top-0 bottom-0 flex items-center justify-center"
+            style={{ left: 8, width: 40 }}
+          >
+            <div className={`flex flex-col items-center text-[12px] font-bold tracking-widest ${darkMode ? 'text-zinc-500' : 'text-zinc-400'}`}>
+              <span>T</span>
+              <span>A</span>
+              <span>B</span>
+            </div>
+          </div>
+
+          {/* Bars and notes */}
+          {bars.map((bar, barIdx) => {
+            const barNotes = getNotesForBar(bar);
+            const barX = LEFT_MARGIN + barIdx * BAR_WIDTH;
+            const isCurrentBar = barIdx === currentBarIndex;
+            const barDuration = bar.endTime - bar.startTime;
+
+            return (
+              <div
+                key={bar.startTime}
+                className="absolute top-0 bottom-0"
+                style={{ left: barX, width: BAR_WIDTH }}
+              >
+                {/* Bar background */}
                 <div
-                  key={fret}
-                  className="flex-1 text-center text-[8px] text-zinc-600"
-                  style={{ minWidth: "18px" }}
+                  className={`absolute inset-0 ${isCurrentBar ? (darkMode ? 'bg-zinc-800' : 'bg-green-50') : ''}`}
+                />
+
+                {/* Bar lines */}
+                <div className={`absolute top-0 bottom-0 left-0 w-0.5 ${darkMode ? 'bg-zinc-500' : 'bg-zinc-400'}`} />
+                <div className={`absolute top-0 bottom-0 right-0 w-0.5 ${darkMode ? 'bg-zinc-500' : 'bg-zinc-400'}`} />
+
+                {/* Section label */}
+                {bar.section && (
+                  <div className={`absolute -top-4 left-1 text-[9px] font-bold ${darkMode ? 'text-amber-400' : 'text-amber-600'}`}>
+                    {bar.section}
+                  </div>
+                )}
+
+                {/* Time signature */}
+                {barIdx === 0 && bar.timeSignature && (
+                  <div className={`absolute -top-5 right-1 text-[9px] font-bold ${darkMode ? 'text-zinc-400' : 'text-zinc-600'}`}>
+                    {bar.timeSignature.numerator}/{bar.timeSignature.denominator}
+                  </div>
+                )}
+
+                {/* String lines */}
+                <div
+                  className="absolute inset-x-0"
+                  style={{ top: "15%", height: "70%" }}
                 >
-                  {marker?.isDouble ? "••" : marker?.isSingle ? "•" : fret}
-                </div>
-              );
-            })}
-          </div>
+                  {TAB_STRINGS.map((strNum, strIdx) => {
+                    const strDef = STANDARD_TUNING.find(
+                      (s) => s.stringNumber === strNum
+                    );
+                    const stringNotes = barNotes.filter(
+                      (n) => n.stringNumber === strNum
+                    );
+                    const yPos = (strIdx / (TAB_STRINGS.length - 1)) * 100;
 
-          {/* Strings and frets */}
-          <div className="flex flex-col gap-0">
-            {STANDARD_TUNING.map((stringDef, idx) => {
-              const isActive = activePositions.some((p) => p.stringNumber === stringDef.stringNumber);
-              const activeFret = activePositions.find((p) => p.stringNumber === stringDef.stringNumber)?.fret ?? -1;
+                    return (
+                      <div
+                        key={strNum}
+                        className="absolute inset-x-0"
+                        style={{ top: `${yPos}%`, height: STRING_HEIGHT }}
+                      >
+                        {/* String line */}
+                        <div className={`absolute inset-x-0 top-1/2 h-px ${darkMode ? 'bg-zinc-400' : 'bg-black'}`} />
 
-              return (
-                <div key={stringDef.stringNumber} className="flex items-center relative">
-                  {/* String label */}
-                  <div
-                    className="w-8 text-right pr-2 text-xs font-bold"
-                    style={{ color: stringDef.color }}
-                  >
-                    {stringDef.name}
-                  </div>
-
-                  {/* Frets */}
-                  <div className="flex-1 flex relative">
-                    {/* String line */}
-                    <div
-                      className="absolute inset-0 flex items-center pointer-events-none"
-                      style={{
-                        height: `${stringThickness[idx]}px`,
-                        background: `linear-gradient(to right, #78716c, #a8a29e)`,
-                      }}
-                    />
-
-                    {/* Fret wires */}
-                    {Array.from({ length: DEFAULT_FRET_COUNT }, (_, i) => i + 1).map((fret) => {
-                      const isNoteHere = fret === activeFret;
-                      return (
+                        {/* String label */}
                         <div
-                          key={fret}
-                          className="flex-1 relative border-r border-zinc-600"
-                          style={{ minWidth: "18px", height: "24px" }}
+                          className="absolute left-0 top-1/2 -translate-y-1/2 text-[10px] font-mono font-bold"
+                          style={{
+                            color: strDef?.color || (darkMode ? '#fff' : '#000'),
+                            width: LEFT_MARGIN - 8,
+                            textAlign: "right",
+                            paddingRight: 8,
+                          }}
                         >
-                          {/* Fret dot */}
-                          {isNoteHere && (
-                            <div
-                              className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 rounded-full animate-pulse"
-                              style={{
-                                background: stringDef.color,
-                                boxShadow: `0 0 8px ${stringDef.color}`,
-                              }}
-                            />
-                          )}
+                          {strDef?.name}
                         </div>
-                      );
-                    })}
-                  </div>
+
+                        {/* Notes */}
+                        {stringNotes.map((note, noteIdx) => {
+                          const noteOffset = note.time - bar.startTime;
+                          const relativePos =
+                            barDuration > 0 ? noteOffset / barDuration : 0;
+                          const noteX = relativePos * BAR_WIDTH;
+                          const isActive =
+                            note.time <= currentTime &&
+                            note.time + note.duration > currentTime;
+                          const isPast = note.time + note.duration <= currentTime;
+
+                          return (
+                            <div
+                              key={`${note.midiPitch}-${noteIdx}`}
+                              className="absolute top-1/2 -translate-y-1/2 z-10"
+                              style={{ left: noteX }}
+                            >
+                              <div
+                                className={`
+                                  text-[11px] font-mono font-bold px-1.5 py-0.5 min-w-[16px] text-center
+                                  transition-all duration-75
+                                  ${
+                                    isActive
+                                      ? 'bg-amber-400 text-black scale-110 shadow-md rounded'
+                                      : isPast
+                                      ? (darkMode ? 'bg-zinc-800 text-zinc-500' : 'bg-zinc-100 text-zinc-500')
+                                      : (darkMode ? 'bg-zinc-900 text-zinc-200' : 'bg-white text-zinc-800')
+                                  }
+                                `}
+                              >
+                                {note.fret}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
                 </div>
-              );
-            })}
+              </div>
+            );
+          })}
+
+          {/* Playhead */}
+          <div
+            ref={playheadRef}
+            className="absolute top-0 bottom-0 w-0.5 bg-green-500 z-20 pointer-events-none"
+            style={{
+              left:
+                LEFT_MARGIN +
+                (currentBarIndex >= 0 && currentBarIndex < bars.length
+                  ? currentBarIndex * BAR_WIDTH +
+                    ((currentTime - bars[currentBarIndex].startTime) /
+                      (bars[currentBarIndex].endTime -
+                        bars[currentBarIndex].startTime)) *
+                      BAR_WIDTH
+                  : 0),
+            }}
+          >
+            {/* Playhead arrow */}
+            <div className="absolute -top-1 -translate-x-1/2">
+              <div className="w-2.5 h-2.5 bg-green-500 rotate-45" />
+            </div>
           </div>
         </div>
-      )}
+      </div>
 
-      {/* Active note display */}
-      <div className="mt-2 text-center">
-        <div className="text-2xl font-bold text-amber-400 min-h-[36px]">
-          {noteName || "-"}
+      {/* Bottom info */}
+      <div className={`flex items-center justify-between px-3 py-1 border-t ${darkMode ? 'bg-zinc-800 border-zinc-700' : 'bg-zinc-100 border-zinc-300'}`}>
+        <div className="flex items-center gap-2">
+          <span className={`text-[9px] ${darkMode ? 'text-zinc-500' : 'text-zinc-600'}`}>EADGBe</span>
+          <span className={`text-[9px] ${darkMode ? 'text-zinc-500' : 'text-zinc-600'}`}>•</span>
+          <span className={`text-[9px] ${darkMode ? 'text-zinc-500' : 'text-zinc-600'}`}>22 trastes</span>
         </div>
-        {activePositions.length > 0 && (
-          <div className="text-[10px] text-zinc-500 mt-1">
-            {activePositions
-              .map((p) => `Cuerda ${STANDARD_TUNING[p.stringNumber - 1].name} Traste ${p.fret}`)
-              .join(" | ")}
-          </div>
-        )}
-      </div>
-
-      {/* Guitar body silhouette (decorative) */}
-      <div className="mt-4 relative">
-        <svg width="120" height="160" viewBox="0 0 120 160" className="opacity-30">
-          {/* Guitar body */}
-          <path
-            d="M30 10 Q60 0 90 10 Q110 30 100 60 Q110 90 90 120 Q60 160 30 120 Q10 90 20 60 Q10 30 30 10Z"
-            fill="none"
-            stroke="#f59e0b"
-            strokeWidth="2"
-          />
-          {/* Sound hole */}
-          <circle cx="60" cy="70" r="15" fill="none" stroke="#f59e0b" strokeWidth="1.5" />
-          {/* Neck */}
-          <rect x="50" y="0" width="20" height="30" fill="none" stroke="#f59e0b" strokeWidth="1.5" />
-          {/* Strings on body */}
-          {STANDARD_TUNING.map((s, i) => (
-            <line
-              key={s.stringNumber}
-              x1={52 + i * 3}
-              y1="0"
-              x2={52 + i * 3}
-              y2="100"
-              stroke={s.color}
-              strokeWidth="0.5"
-              opacity="0.6"
-            />
-          ))}
-        </svg>
-      </div>
-
-      {/* Legend */}
-      <div className="mt-2 flex flex-wrap gap-2 justify-center">
-        {STANDARD_TUNING.map((s) => (
-          <div key={s.stringNumber} className="flex items-center gap-1">
+        <div className="flex items-center gap-1">
+          {STANDARD_TUNING.map((s) => (
             <div
-              className="w-2 h-2 rounded-full"
+              key={s.stringNumber}
+              className="w-1.5 h-1.5 rounded-full"
               style={{ background: s.color }}
             />
-            <span className="text-[9px] text-zinc-500">{s.name}</span>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     </div>
   );
